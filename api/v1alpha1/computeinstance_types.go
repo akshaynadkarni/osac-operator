@@ -34,6 +34,23 @@ type ComputeInstanceSpec struct {
 	// selected compute instance template.
 	// +kubebuilder:validation:Optional
 	TemplateParameters string `json:"templateParameters,omitempty"`
+
+	// RestartRequestedAt is a timestamp signal to request a VM restart.
+	//
+	// Set this field to the current time (usually NOW) to request a restart.
+	// The controller will execute the restart if this timestamp is greater than
+	// status.lastRestartedAt.
+	//
+	// This is a declarative signal mechanism - the timestamp is a monotonically
+	// increasing value to detect new restart requests, not a scheduled time.
+	// Typically set to the current time for immediate restarts.
+	//
+	// External schedulers can set this field on a schedule to implement
+	// scheduled maintenance windows if needed.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	RestartRequestedAt *metav1.Time `json:"restartRequestedAt,omitempty"`
 }
 
 // ComputeInstancePhaseType is a valid value for .status.phase
@@ -68,6 +85,12 @@ const (
 
 	// ComputeInstanceConditionDeleting means the compute instance is being deleted
 	ComputeInstanceConditionDeleting ComputeInstanceConditionType = "Deleting"
+
+	// ComputeInstanceConditionRestartInProgress indicates a restart is in progress
+	ComputeInstanceConditionRestartInProgress ComputeInstanceConditionType = "RestartInProgress"
+
+	// ComputeInstanceConditionRestartFailed indicates a restart request has failed
+	ComputeInstanceConditionRestartFailed ComputeInstanceConditionType = "RestartFailed"
 )
 
 // VirtualMachineReferenceType contains a reference to the KubeVirt VirtualMachine CR created by this ComputeInstance
@@ -114,6 +137,15 @@ type ComputeInstanceStatus struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Type=string
 	ReconciledConfigVersion string `json:"reconciledConfigVersion,omitempty"`
+
+	// LastRestartedAt records when the last restart was initiated by the controller.
+	//
+	// This is set to spec.restartRequestedAt when the controller processes a restart request.
+	// It will be empty if no restart has been performed yet.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	LastRestartedAt *metav1.Time `json:"lastRestartedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

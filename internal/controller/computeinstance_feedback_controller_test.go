@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -245,14 +246,14 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 					Status:             metav1.ConditionFalse,
 					Reason:             "Accepted",
 					Message:            "VM is accepted",
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: metav1.NewTime(time.Now().UTC()),
 				},
 				{
 					Type:               string(cloudkitv1alpha1.ComputeInstanceConditionProgressing),
 					Status:             metav1.ConditionTrue,
 					Reason:             "Progressing",
 					Message:            "VM is progressing",
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: metav1.NewTime(time.Now().UTC()),
 				},
 			}
 			Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
@@ -371,6 +372,136 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			Expect(result.IsZero()).To(BeTrue())
 			// Update count should still be 1, not 2, because only the timestamp changed, not the status
 			Expect(mockClient.updateCount).To(Equal(1))
+		})
+
+		It("should sync lastRestartedAt when set in K8s CR", func() {
+			// Get the ComputeInstance and update its status with lastRestartedAt
+			computeInstance := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, computeInstance)).To(Succeed())
+
+			// Use time without nanoseconds to match protobuf precision
+			restartTime := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+			computeInstance.Status.LastRestartedAt = &restartTime
+			Expect(k8sClient.Status().Update(ctx, computeInstance)).To(Succeed())
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
+			Expect(mockClient.lastUpdate).NotTo(BeNil())
+
+			// Verify lastRestartedAt was synced
+			Expect(mockClient.lastUpdate.GetStatus().HasLastRestartedAt()).To(BeTrue())
+			Expect(mockClient.lastUpdate.GetStatus().GetLastRestartedAt().AsTime()).To(Equal(restartTime.Time))
+		})
+
+		It("should not set lastRestartedAt when nil in K8s CR", func() {
+			// Get the ComputeInstance - lastRestartedAt should be nil by default
+			computeInstance := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, computeInstance)).To(Succeed())
+			Expect(computeInstance.Status.LastRestartedAt).To(BeNil())
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
+			Expect(mockClient.lastUpdate).NotTo(BeNil())
+
+			// Verify lastRestartedAt was NOT set (still using default from mock)
+			Expect(mockClient.lastUpdate.GetStatus().HasLastRestartedAt()).To(BeFalse())
+		})
+
+		It("should sync RestartInProgress condition when set to True", func() {
+			// Get the ComputeInstance and add RestartInProgress condition
+			computeInstance := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, computeInstance)).To(Succeed())
+
+			restartInProgressMessage := "Restart initiated at 2026-02-01T10:20:58Z"
+			computeInstance.Status.Conditions = append(computeInstance.Status.Conditions, metav1.Condition{
+				Type:               string(cloudkitv1alpha1.ComputeInstanceConditionRestartInProgress),
+				Status:             metav1.ConditionTrue,
+				Reason:             ReasonRestartInProgress,
+				Message:            restartInProgressMessage,
+				LastTransitionTime: metav1.NewTime(time.Now().UTC()),
+			})
+			Expect(k8sClient.Status().Update(ctx, computeInstance)).To(Succeed())
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
+
+			// Verify RestartInProgress condition was synced
+			found := false
+			for _, cond := range mockClient.lastUpdate.GetStatus().GetConditions() {
+				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_RESTART_IN_PROGRESS {
+					Expect(cond.GetStatus()).To(Equal(sharedv1.ConditionStatus_CONDITION_STATUS_TRUE))
+					Expect(cond.GetMessage()).To(Equal(restartInProgressMessage))
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue())
+		})
+
+		It("should sync RestartFailed condition when set to True", func() {
+			// Get the ComputeInstance and add RestartFailed condition
+			computeInstance := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, computeInstance)).To(Succeed())
+
+			restartFailedMessage := "No VirtualMachine reference found"
+			computeInstance.Status.Conditions = append(computeInstance.Status.Conditions, metav1.Condition{
+				Type:               string(cloudkitv1alpha1.ComputeInstanceConditionRestartFailed),
+				Status:             metav1.ConditionTrue,
+				Reason:             ReasonNoVMReference,
+				Message:            restartFailedMessage,
+				LastTransitionTime: metav1.NewTime(time.Now().UTC()),
+			})
+			Expect(k8sClient.Status().Update(ctx, computeInstance)).To(Succeed())
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
+
+			// Verify RestartFailed condition was synced
+			found := false
+			for _, cond := range mockClient.lastUpdate.GetStatus().GetConditions() {
+				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_RESTART_FAILED {
+					Expect(cond.GetStatus()).To(Equal(sharedv1.ConditionStatus_CONDITION_STATUS_TRUE))
+					Expect(cond.GetMessage()).To(Equal(restartFailedMessage))
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue())
+		})
+
+		It("should not crash when restart conditions are not present", func() {
+			// RestartInProgress and RestartFailed conditions should not be present by default
+			computeInstance := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, computeInstance)).To(Succeed())
+
+			// Verify conditions don't include restart conditions
+			for _, cond := range computeInstance.Status.Conditions {
+				Expect(cond.Type).NotTo(Equal(string(cloudkitv1alpha1.ComputeInstanceConditionRestartInProgress)))
+				Expect(cond.Type).NotTo(Equal(string(cloudkitv1alpha1.ComputeInstanceConditionRestartFailed)))
+			}
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
 		})
 	})
 })

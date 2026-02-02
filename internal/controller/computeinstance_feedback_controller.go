@@ -156,11 +156,14 @@ func (t *computeInstanceFeedbackReconcilerTask) handleUpdate(ctx context.Context
 	t.syncConditions(ctx)
 	t.syncPhase(ctx)
 	t.syncIPAddress()
+	t.syncLastRestartedAt()
 }
 
 func (t *computeInstanceFeedbackReconcilerTask) syncConditions(ctx context.Context) {
 	t.syncProgressing(ctx)
 	t.syncReady(ctx)
+	t.syncRestartInProgress(ctx)
+	t.syncRestartFailed(ctx)
 }
 
 // syncProgressing synchronizes the PROGRESSING VM condition from multiple CR conditions.
@@ -201,6 +204,24 @@ func (t *computeInstanceFeedbackReconcilerTask) syncReady(ctx context.Context) {
 		return
 	}
 	t.syncVMConditionFromCR(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_READY, crCondition)
+}
+
+// syncRestartInProgress synchronizes the RESTART_IN_PROGRESS VM condition from the RestartInProgress CR condition.
+func (t *computeInstanceFeedbackReconcilerTask) syncRestartInProgress(ctx context.Context) {
+	crCondition := t.object.GetStatusCondition(ckv1alpha1.ComputeInstanceConditionRestartInProgress)
+	if crCondition == nil {
+		return
+	}
+	t.syncVMConditionFromCR(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_RESTART_IN_PROGRESS, crCondition)
+}
+
+// syncRestartFailed synchronizes the RESTART_FAILED VM condition from the RestartFailed CR condition.
+func (t *computeInstanceFeedbackReconcilerTask) syncRestartFailed(ctx context.Context) {
+	crCondition := t.object.GetStatusCondition(ckv1alpha1.ComputeInstanceConditionRestartFailed)
+	if crCondition == nil {
+		return
+	}
+	t.syncVMConditionFromCR(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_RESTART_FAILED, crCondition)
 }
 
 // syncVMConditionFromCR synchronizes a VM condition from a CR condition.
@@ -278,5 +299,11 @@ func (t *computeInstanceFeedbackReconcilerTask) syncIPAddress() {
 	ipAddress, ok := t.object.Annotations[cloudkitVirualMachineFloatingIPAddressAnnotation]
 	if ok && ipAddress != "" {
 		t.ci.GetStatus().SetIpAddress(ipAddress)
+	}
+}
+
+func (t *computeInstanceFeedbackReconcilerTask) syncLastRestartedAt() {
+	if t.object.Status.LastRestartedAt != nil {
+		t.ci.GetStatus().SetLastRestartedAt(timestamppb.New(t.object.Status.LastRestartedAt.Time))
 	}
 }
