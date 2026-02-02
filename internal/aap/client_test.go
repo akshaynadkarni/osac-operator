@@ -207,4 +207,108 @@ var _ = Describe("Client", func() {
 			})
 		})
 	})
+
+	Describe("DetectTemplateType", func() {
+		Context("with caching", func() {
+			var requestCount int
+
+			BeforeEach(func() {
+				requestCount = 0
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requestCount++
+					if r.URL.Path == "/api/v2/job_templates/cached-job/" {
+						w.WriteHeader(http.StatusOK)
+						json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+					} else {
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				client = aap.NewClient(server.URL, "test-token")
+			})
+
+			It("should cache result and avoid repeated AAP queries", func() {
+				// First call queries AAP and caches
+				templateType, err := client.DetectTemplateType(ctx, "cached-job")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(templateType).To(Equal(aap.TemplateTypeJob))
+				Expect(requestCount).To(Equal(1))
+
+				// Second call uses cache without querying AAP
+				templateType, err = client.DetectTemplateType(ctx, "cached-job")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(templateType).To(Equal(aap.TemplateTypeJob))
+				Expect(requestCount).To(Equal(1)) // No additional requests
+			})
+		})
+	})
+
+	Describe("InvalidateTemplateCache", func() {
+		var requestCount int
+
+		BeforeEach(func() {
+			requestCount = 0
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				if r.URL.Path == "/api/v2/job_templates/my-job/" {
+					w.WriteHeader(http.StatusOK)
+					json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+				} else {
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			client = aap.NewClient(server.URL, "test-token")
+		})
+
+		It("should remove template from cache", func() {
+			// Populate cache
+			_, err := client.DetectTemplateType(ctx, "my-job")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(requestCount).To(Equal(1))
+
+			// Invalidate cache
+			client.InvalidateTemplateCache("my-job")
+
+			// Should query AAP again
+			_, err = client.DetectTemplateType(ctx, "my-job")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(requestCount).To(Equal(2))
+		})
+	})
+
+	Describe("ClearTemplateCache", func() {
+		var requestCount int
+
+		BeforeEach(func() {
+			requestCount = 0
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				if r.URL.Path == "/api/v2/job_templates/job1/" || r.URL.Path == "/api/v2/workflow_job_templates/workflow1/" {
+					w.WriteHeader(http.StatusOK)
+					json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+				} else {
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			client = aap.NewClient(server.URL, "test-token")
+		})
+
+		It("should clear all cached templates", func() {
+			// Populate cache with multiple entries
+			_, err := client.DetectTemplateType(ctx, "job1")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = client.DetectTemplateType(ctx, "workflow1")
+			Expect(err).NotTo(HaveOccurred())
+			initialCount := requestCount
+
+			// Clear cache
+			client.ClearTemplateCache()
+
+			// Both should query AAP again
+			_, err = client.DetectTemplateType(ctx, "job1")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = client.DetectTemplateType(ctx, "workflow1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(requestCount).To(Equal(initialCount * 2))
+		})
+	})
 })

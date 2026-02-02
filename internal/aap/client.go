@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -17,9 +18,10 @@ const (
 
 // Client provides an HTTP client for interacting with AAP (Ansible Automation Platform) REST API.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	token      string
+	baseURL       string
+	httpClient    *http.Client
+	token         string
+	templateCache sync.Map // map[string]TemplateType - caches template name → type
 }
 
 // NewClient creates a new AAP API client.
@@ -133,6 +135,7 @@ func (c *Client) GetJob(ctx context.Context, jobID int) (*Job, error) {
 }
 
 // GetTemplateType queries AAP to determine if a template is a job_template or workflow_job_template.
+// This method does not use caching.
 func (c *Client) GetTemplateType(ctx context.Context, templateName string) (TemplateType, error) {
 	// Try job template first
 	jobURL := fmt.Sprintf("%s/%s/job_templates/%s/", c.baseURL, apiVersion, templateName)
@@ -149,6 +152,38 @@ func (c *Client) GetTemplateType(ctx context.Context, templateName string) (Temp
 	}
 
 	return "", fmt.Errorf("template %s not found as job_template or workflow_job_template", templateName)
+}
+
+// DetectTemplateType determines the template type with caching.
+// Checks cache first, then queries AAP if not cached.
+func (c *Client) DetectTemplateType(ctx context.Context, templateName string) (TemplateType, error) {
+	// Check cache first
+	if cached, ok := c.templateCache.Load(templateName); ok {
+		return cached.(TemplateType), nil
+	}
+
+	// Not in cache, query AAP
+	templateType, err := c.GetTemplateType(ctx, templateName)
+	if err != nil {
+		return "", err
+	}
+
+	// Store in cache
+	c.templateCache.Store(templateName, templateType)
+	return templateType, nil
+}
+
+// InvalidateTemplateCache removes a template from the cache.
+func (c *Client) InvalidateTemplateCache(templateName string) {
+	c.templateCache.Delete(templateName)
+}
+
+// ClearTemplateCache removes all templates from the cache.
+func (c *Client) ClearTemplateCache() {
+	c.templateCache.Range(func(key, value interface{}) bool {
+		c.templateCache.Delete(key)
+		return true
+	})
 }
 
 // doRequest performs an HTTP request with authentication and returns the response body.
