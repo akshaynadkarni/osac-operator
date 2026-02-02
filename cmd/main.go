@@ -49,6 +49,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	v1alpha1 "github.com/innabox/cloudkit-operator/api/v1alpha1"
+	"github.com/innabox/cloudkit-operator/internal/aap"
 	"github.com/innabox/cloudkit-operator/internal/controller"
 	"github.com/innabox/cloudkit-operator/internal/helpers"
 	"github.com/innabox/cloudkit-operator/internal/provisioning"
@@ -61,8 +62,26 @@ var (
 )
 
 const (
+	// EDA webhook environment variables
 	envComputeInstanceCreateWebhook = "CLOUDKIT_COMPUTE_INSTANCE_CREATE_WEBHOOK"
 	envComputeInstanceDeleteWebhook = "CLOUDKIT_COMPUTE_INSTANCE_DELETE_WEBHOOK"
+
+	// Provider selection
+	envProvisioningProvider = "CLOUDKIT_PROVISIONING_PROVIDER"
+
+	// Provider type values
+	providerTypeEDA = "eda"
+	providerTypeAAP = "aap"
+
+	// AAP configuration
+	envAAPURL                 = "CLOUDKIT_AAP_URL"
+	envAAPToken               = "CLOUDKIT_AAP_TOKEN"
+	envAAPProvisionTemplate   = "CLOUDKIT_AAP_PROVISION_TEMPLATE"
+	envAAPDeprovisionTemplate = "CLOUDKIT_AAP_DEPROVISION_TEMPLATE"
+	envAAPStatusPollInterval  = "CLOUDKIT_AAP_STATUS_POLL_INTERVAL"
+
+	// Default status poll interval for provisioning providers
+	defaultStatusPollInterval = 30 * time.Second
 )
 
 func init() {
@@ -72,6 +91,46 @@ func init() {
 	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
 	utilruntime.Must(ovnv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// createEDAProvider creates and validates EDA webhook provider configuration.
+func createEDAProvider(createWebhook, deleteWebhook string, minimumRequestInterval time.Duration) (provisioning.ProvisioningProvider, time.Duration, error) {
+	if createWebhook == "" || deleteWebhook == "" {
+		return nil, 0, fmt.Errorf("EDA provider requires both %s and %s", envComputeInstanceCreateWebhook, envComputeInstanceDeleteWebhook)
+	}
+
+	webhookClient := controller.NewWebhookClient(10*time.Second, minimumRequestInterval)
+	provider := provisioning.NewEDAProvider(webhookClient, createWebhook, deleteWebhook)
+	setupLog.Info("using EDA webhook provider for ComputeInstance", "createURL", createWebhook, "deleteURL", deleteWebhook)
+
+	return provider, defaultStatusPollInterval, nil
+}
+
+// createAAPProvider creates and validates AAP direct provider configuration.
+func createAAPProvider(aapURL, aapToken, provisionTemplate, deprovisionTemplate string) (provisioning.ProvisioningProvider, time.Duration, error) {
+	if aapURL == "" || aapToken == "" {
+		return nil, 0, fmt.Errorf("AAP provider requires both %s and %s", envAAPURL, envAAPToken)
+	}
+
+	// Parse status poll interval with default
+	statusPollInterval := defaultStatusPollInterval
+	if pollIntervalStr := os.Getenv(envAAPStatusPollInterval); pollIntervalStr != "" {
+		if interval, err := time.ParseDuration(pollIntervalStr); err == nil {
+			statusPollInterval = interval
+		} else {
+			setupLog.Error(err, "invalid AAP status poll interval, using default", "interval", pollIntervalStr, "default", statusPollInterval)
+		}
+	}
+
+	aapClient := aap.NewClient(aapURL, aapToken)
+	provider := provisioning.NewAAPProvider(aapClient, provisionTemplate, deprovisionTemplate)
+	setupLog.Info("using AAP direct provider for ComputeInstance",
+		"url", aapURL,
+		"provisionTemplate", provisionTemplate,
+		"deprovisionTemplate", deprovisionTemplate,
+		"statusPollInterval", statusPollInterval)
+
+	return provider, statusPollInterval, nil
 }
 
 func main() {
@@ -282,14 +341,44 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create the ComputeInstance reconciler
+	// Create the ComputeInstance reconciler with appropriate provider
 	var computeInstanceProvider provisioning.ProvisioningProvider
+	var statusPollInterval time.Duration
+
+	// Read all configuration upfront
+	providerType := os.Getenv(envProvisioningProvider)
 	createWebhook := os.Getenv(envComputeInstanceCreateWebhook)
 	deleteWebhook := os.Getenv(envComputeInstanceDeleteWebhook)
-	if createWebhook != "" || deleteWebhook != "" {
-		webhookClient := controller.NewWebhookClient(10*time.Second, minimumRequestInterval)
-		computeInstanceProvider = provisioning.NewEDAProvider(webhookClient, createWebhook, deleteWebhook)
-		setupLog.Info("using EDA webhook provider for ComputeInstance", "createURL", createWebhook, "deleteURL", deleteWebhook)
+	aapURL := os.Getenv(envAAPURL)
+	aapToken := os.Getenv(envAAPToken)
+	provisionTemplate := os.Getenv(envAAPProvisionTemplate)
+	deprovisionTemplate := os.Getenv(envAAPDeprovisionTemplate)
+
+	// Default to EDA if not specified (backward compatibility)
+	if providerType == "" {
+		providerType = providerTypeEDA
+	}
+
+	switch providerType {
+	case providerTypeEDA:
+		var err error
+		computeInstanceProvider, statusPollInterval, err = createEDAProvider(createWebhook, deleteWebhook, minimumRequestInterval)
+		if err != nil {
+			setupLog.Error(err, "failed to create EDA provider")
+			os.Exit(1)
+		}
+
+	case providerTypeAAP:
+		var err error
+		computeInstanceProvider, statusPollInterval, err = createAAPProvider(aapURL, aapToken, provisionTemplate, deprovisionTemplate)
+		if err != nil {
+			setupLog.Error(err, "failed to create AAP provider")
+			os.Exit(1)
+		}
+
+	default:
+		setupLog.Error(fmt.Errorf("unknown provider type: %s", providerType), "invalid provider configuration")
+		os.Exit(1)
 	}
 
 	if err = (controller.NewComputeInstanceReconciler(
@@ -297,7 +386,7 @@ func main() {
 		mgr.GetScheme(),
 		computeInstanceNamespace,
 		computeInstanceProvider,
-		30*time.Second,
+		statusPollInterval,
 	)).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ComputeInstance")
 		os.Exit(1)
