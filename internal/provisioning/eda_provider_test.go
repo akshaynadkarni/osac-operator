@@ -3,6 +3,7 @@ package provisioning_test
 import (
 	"context"
 	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -11,18 +12,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/innabox/cloudkit-operator/internal/provisioning"
+	"github.com/innabox/cloudkit-operator/internal/webhook"
 )
 
 // mockWebhookClient is a test double for WebhookClient
 type mockWebhookClient struct {
-	triggerWebhookFunc func(ctx context.Context, url string, resource provisioning.WebhookResource) (interface{}, error)
+	triggerWebhookFunc func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error)
 }
 
-func (m *mockWebhookClient) TriggerWebhook(ctx context.Context, url string, resource provisioning.WebhookResource) (interface{}, error) {
+func (m *mockWebhookClient) TriggerWebhook(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
 	if m.triggerWebhookFunc != nil {
 		return m.triggerWebhookFunc(ctx, url, resource)
 	}
-	return nil, nil
+	return 0, nil
 }
 
 // mockResource is a test double for a Kubernetes resource that implements WebhookResource
@@ -64,9 +66,9 @@ var _ = Describe("EDAProvider", func() {
 	Describe("TriggerProvision", func() {
 		Context("when webhook succeeds", func() {
 			BeforeEach(func() {
-				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource provisioning.WebhookResource) (interface{}, error) {
+				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
 					Expect(url).To(Equal("http://create-url"))
-					return nil, nil
+					return 0, nil
 				}
 			})
 
@@ -79,8 +81,8 @@ var _ = Describe("EDAProvider", func() {
 
 		Context("when webhook fails", func() {
 			BeforeEach(func() {
-				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource provisioning.WebhookResource) (interface{}, error) {
-					return nil, errors.New("webhook error")
+				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
+					return 0, errors.New("webhook error")
 				}
 			})
 
@@ -102,6 +104,24 @@ var _ = Describe("EDAProvider", func() {
 				Expect(err.Error()).To(ContainSubstring("create webhook URL not configured"))
 			})
 		})
+
+		Context("when webhook is rate-limited", func() {
+			BeforeEach(func() {
+				provider = provisioning.NewEDAProvider(webhookClient, "http://create-url", "http://delete-url")
+				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
+					return 5 * time.Second, nil
+				}
+			})
+
+			It("should return RateLimitError", func() {
+				_, err := provider.TriggerProvision(ctx, resource)
+				Expect(err).To(HaveOccurred())
+
+				var rateLimitErr *provisioning.RateLimitError
+				Expect(errors.As(err, &rateLimitErr)).To(BeTrue())
+				Expect(rateLimitErr.RetryAfter).To(Equal(5 * time.Second))
+			})
+		})
 	})
 
 	Describe("GetProvisionStatus", func() {
@@ -116,9 +136,9 @@ var _ = Describe("EDAProvider", func() {
 	Describe("TriggerDeprovision", func() {
 		Context("when webhook succeeds", func() {
 			BeforeEach(func() {
-				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource provisioning.WebhookResource) (interface{}, error) {
+				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
 					Expect(url).To(Equal("http://delete-url"))
-					return nil, nil
+					return 0, nil
 				}
 			})
 
@@ -131,8 +151,8 @@ var _ = Describe("EDAProvider", func() {
 
 		Context("when webhook fails", func() {
 			BeforeEach(func() {
-				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource provisioning.WebhookResource) (interface{}, error) {
-					return nil, errors.New("webhook error")
+				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
+					return 0, errors.New("webhook error")
 				}
 			})
 
@@ -152,6 +172,24 @@ var _ = Describe("EDAProvider", func() {
 				_, err := provider.TriggerDeprovision(ctx, resource)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("delete webhook URL not configured"))
+			})
+		})
+
+		Context("when webhook is rate-limited", func() {
+			BeforeEach(func() {
+				provider = provisioning.NewEDAProvider(webhookClient, "http://create-url", "http://delete-url")
+				webhookClient.triggerWebhookFunc = func(ctx context.Context, url string, resource webhook.Resource) (time.Duration, error) {
+					return 3 * time.Second, nil
+				}
+			})
+
+			It("should return RateLimitError", func() {
+				_, err := provider.TriggerDeprovision(ctx, resource)
+				Expect(err).To(HaveOccurred())
+
+				var rateLimitErr *provisioning.RateLimitError
+				Expect(errors.As(err, &rateLimitErr)).To(BeTrue())
+				Expect(rateLimitErr.RetryAfter).To(Equal(3 * time.Second))
 			})
 		})
 	})

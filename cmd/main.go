@@ -51,12 +51,18 @@ import (
 	v1alpha1 "github.com/innabox/cloudkit-operator/api/v1alpha1"
 	"github.com/innabox/cloudkit-operator/internal/controller"
 	"github.com/innabox/cloudkit-operator/internal/helpers"
+	"github.com/innabox/cloudkit-operator/internal/provisioning"
 	// +kubebuilder:scaffold:imports
 )
 
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+)
+
+const (
+	envComputeInstanceCreateWebhook = "CLOUDKIT_COMPUTE_INSTANCE_CREATE_WEBHOOK"
+	envComputeInstanceDeleteWebhook = "CLOUDKIT_COMPUTE_INSTANCE_DELETE_WEBHOOK"
 )
 
 func init() {
@@ -277,13 +283,21 @@ func main() {
 	}
 
 	// Create the ComputeInstance reconciler
+	var computeInstanceProvider provisioning.ProvisioningProvider
+	createWebhook := os.Getenv(envComputeInstanceCreateWebhook)
+	deleteWebhook := os.Getenv(envComputeInstanceDeleteWebhook)
+	if createWebhook != "" || deleteWebhook != "" {
+		webhookClient := controller.NewWebhookClient(10*time.Second, minimumRequestInterval)
+		computeInstanceProvider = provisioning.NewEDAProvider(webhookClient, createWebhook, deleteWebhook)
+		setupLog.Info("using EDA webhook provider for ComputeInstance", "createURL", createWebhook, "deleteURL", deleteWebhook)
+	}
+
 	if err = (controller.NewComputeInstanceReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
-		os.Getenv("CLOUDKIT_COMPUTE_INSTANCE_CREATE_WEBHOOK"),
-		os.Getenv("CLOUDKIT_COMPUTE_INSTANCE_DELETE_WEBHOOK"),
 		computeInstanceNamespace,
-		minimumRequestInterval,
+		computeInstanceProvider,
+		30*time.Second,
 	)).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ComputeInstance")
 		os.Exit(1)

@@ -3,19 +3,26 @@ package provisioning
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/innabox/cloudkit-operator/internal/webhook"
 )
+
+// RateLimitError indicates a request was rate-limited and should be retried.
+type RateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limit active, retry after %v", e.RetryAfter)
+}
 
 // WebhookClient is the interface for triggering webhooks to EDA.
 // This matches the existing webhook_common.WebhookClient implementation.
 type WebhookClient interface {
-	TriggerWebhook(ctx context.Context, url string, resource WebhookResource) (remainingTime interface{}, err error)
-}
-
-// WebhookResource represents a resource that can be sent via webhook.
-type WebhookResource interface {
-	GetName() string
+	TriggerWebhook(ctx context.Context, url string, resource webhook.Resource) (remainingTime time.Duration, err error)
 }
 
 // EDAProvider implements ProvisioningProvider using EDA webhooks.
@@ -37,19 +44,25 @@ func NewEDAProvider(webhookClient WebhookClient, createURL, deleteURL string) *E
 
 // TriggerProvision triggers provisioning via EDA webhook.
 // Returns the resource name as job ID since EDA doesn't provide a real job ID.
+// Returns RateLimitError if the request is rate-limited.
 func (p *EDAProvider) TriggerProvision(ctx context.Context, resource client.Object) (string, error) {
 	if p.createURL == "" {
 		return "", fmt.Errorf("create webhook URL not configured")
 	}
 
-	webhookResource, ok := resource.(WebhookResource)
+	webhookResource, ok := resource.(webhook.Resource)
 	if !ok {
-		return "", fmt.Errorf("resource does not implement WebhookResource interface")
+		return "", fmt.Errorf("resource does not implement webhook.Resource interface")
 	}
 
-	_, err := p.webhookClient.TriggerWebhook(ctx, p.createURL, webhookResource)
+	remainingTime, err := p.webhookClient.TriggerWebhook(ctx, p.createURL, webhookResource)
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger create webhook: %w", err)
+	}
+
+	// If we're within the rate limit window, return rate limit error
+	if remainingTime > 0 {
+		return "", &RateLimitError{RetryAfter: remainingTime}
 	}
 
 	return resource.GetName(), nil
@@ -68,19 +81,25 @@ func (p *EDAProvider) GetProvisionStatus(ctx context.Context, jobID string) (Pro
 
 // TriggerDeprovision triggers deprovisioning via EDA webhook.
 // Returns the resource name as job ID since EDA doesn't provide a real job ID.
+// Returns RateLimitError if the request is rate-limited.
 func (p *EDAProvider) TriggerDeprovision(ctx context.Context, resource client.Object) (string, error) {
 	if p.deleteURL == "" {
 		return "", fmt.Errorf("delete webhook URL not configured")
 	}
 
-	webhookResource, ok := resource.(WebhookResource)
+	webhookResource, ok := resource.(webhook.Resource)
 	if !ok {
-		return "", fmt.Errorf("resource does not implement WebhookResource interface")
+		return "", fmt.Errorf("resource does not implement webhook.Resource interface")
 	}
 
-	_, err := p.webhookClient.TriggerWebhook(ctx, p.deleteURL, webhookResource)
+	remainingTime, err := p.webhookClient.TriggerWebhook(ctx, p.deleteURL, webhookResource)
 	if err != nil {
 		return "", fmt.Errorf("failed to trigger delete webhook: %w", err)
+	}
+
+	// If we're within the rate limit window, return rate limit error
+	if remainingTime > 0 {
+		return "", &RateLimitError{RetryAfter: remainingTime}
 	}
 
 	return resource.GetName(), nil

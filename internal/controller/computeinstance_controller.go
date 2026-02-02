@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"time"
@@ -38,39 +39,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/innabox/cloudkit-operator/api/v1alpha1"
+	"github.com/innabox/cloudkit-operator/internal/provisioning"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
 // ComputeInstanceReconciler reconciles a ComputeInstance object
 type ComputeInstanceReconciler struct {
 	client.Client
-	Scheme                       *runtime.Scheme
-	CreateComputeInstanceWebhook string
-	DeleteComputeInstanceWebhook string
-	ComputeInstanceNamespace     string
-	webhookClient                *WebhookClient
+	Scheme                   *runtime.Scheme
+	ComputeInstanceNamespace string
+	ProvisioningProvider     provisioning.ProvisioningProvider
+	// StatusPollInterval defines how often to check provisioning job status
+	StatusPollInterval time.Duration
 }
 
 func NewComputeInstanceReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
-	createVMWebhook string,
-	deleteVMWebhook string,
 	computeInstanceNamespace string,
-	minimumRequestInterval time.Duration,
+	provisioningProvider provisioning.ProvisioningProvider,
+	statusPollInterval time.Duration,
 ) *ComputeInstanceReconciler {
 
 	if computeInstanceNamespace == "" {
 		computeInstanceNamespace = defaultComputeInstanceNamespace
 	}
 
+	if statusPollInterval == 0 {
+		statusPollInterval = 30 * time.Second
+	}
+
 	return &ComputeInstanceReconciler{
-		Client:                       client,
-		Scheme:                       scheme,
-		CreateComputeInstanceWebhook: createVMWebhook,
-		DeleteComputeInstanceWebhook: deleteVMWebhook,
-		ComputeInstanceNamespace:     computeInstanceNamespace,
-		webhookClient:                NewWebhookClient(10*time.Second, minimumRequestInterval),
+		Client:                   client,
+		Scheme:                   scheme,
+		ComputeInstanceNamespace: computeInstanceNamespace,
+		ProvisioningProvider:     provisioningProvider,
+		StatusPollInterval:       statusPollInterval,
 	}
 }
 
@@ -203,6 +207,181 @@ func (r *ComputeInstanceReconciler) mapObjectToComputeInstance(ctx context.Conte
 	}
 }
 
+// handleProvisioning manages the provisioning job lifecycle for a ComputeInstance.
+// It triggers provisioning if needed and polls job status until completion.
+// Status updates are handled by the main reconcile loop.
+func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, instance *v1alpha1.ComputeInstance) (ctrl.Result, error) {
+	log := ctrllog.FromContext(ctx)
+
+	// Check for ManagementStateManual annotation
+	val, exists := instance.Annotations[cloudkitComputeInstanceManagementStateAnnotation]
+	if exists && val == ManagementStateManual {
+		log.Info("skipping provisioning due to management-state annotation", "management-state", val)
+		return ctrl.Result{}, nil
+	}
+
+	// If no provider configured, skip provisioning
+	if r.ProvisioningProvider == nil {
+		log.Info("no provisioning provider configured, skipping provisioning")
+		return ctrl.Result{}, nil
+	}
+
+	// Check if we already have a job ID
+	if instance.Status.ProvisionJobID == "" {
+		// No job yet, trigger provisioning
+		log.Info("triggering provisioning", "provider", r.ProvisioningProvider.Name())
+		jobID, err := r.ProvisioningProvider.TriggerProvision(ctx, instance)
+		if err != nil {
+			// Check if this is a rate limit error
+			var rateLimitErr *provisioning.RateLimitError
+			if errors.As(err, &rateLimitErr) {
+				log.Info("provisioning request rate-limited, will retry", "retryAfter", rateLimitErr.RetryAfter)
+				return ctrl.Result{RequeueAfter: rateLimitErr.RetryAfter}, nil
+			}
+
+			// Actual error - mark as failed
+			log.Error(err, "failed to trigger provisioning")
+			instance.Status.ProvisionJobState = string(provisioning.JobStateFailed)
+			instance.Status.ProvisionJobMessage = fmt.Sprintf("Failed to trigger provisioning: %v", err)
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+
+		instance.Status.ProvisionJobID = jobID
+		instance.Status.ProvisionJobState = string(provisioning.JobStatePending)
+		instance.Status.ProvisionJobMessage = "Provisioning job triggered"
+		log.Info("provisioning job triggered", "jobID", jobID)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// We have a job ID, check its status
+	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance.Status.ProvisionJobID)
+	if err != nil {
+		log.Error(err, "failed to get provision job status", "jobID", instance.Status.ProvisionJobID)
+		instance.Status.ProvisionJobMessage = fmt.Sprintf("Failed to get job status: %v", err)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// Update status fields (main reconcile loop will persist these)
+	instance.Status.ProvisionJobState = string(status.State)
+	instance.Status.ProvisionJobMessage = status.Message
+	if status.ErrorDetails != "" {
+		instance.Status.ProvisionJobMessage = fmt.Sprintf("%s: %s", status.Message, status.ErrorDetails)
+	}
+
+	// If job is still running, requeue
+	if !status.State.IsTerminal() {
+		log.Info("provision job still running", "jobID", instance.Status.ProvisionJobID, "state", status.State)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// Job is complete
+	if status.State.IsSuccessful() {
+		log.Info("provision job succeeded", "jobID", instance.Status.ProvisionJobID)
+		// Update reconciled version if provided
+		if status.ReconciledVersion != "" {
+			instance.Status.ReconciledConfigVersion = status.ReconciledVersion
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Job failed
+	log.Error(nil, "provision job failed", "jobID", instance.Status.ProvisionJobID, "message", instance.Status.ProvisionJobMessage)
+	instance.Status.Phase = v1alpha1.ComputeInstancePhaseFailed
+	return ctrl.Result{}, nil
+}
+
+// handleDeprovisioning manages the deprovisioning job lifecycle for a ComputeInstance.
+// It triggers deprovisioning if needed and polls job status until completion.
+// Status updates are handled by the main reconcile loop.
+func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, instance *v1alpha1.ComputeInstance) (ctrl.Result, error) {
+	log := ctrllog.FromContext(ctx)
+
+	// Check for ManagementStateManual annotation
+	val, exists := instance.Annotations[cloudkitComputeInstanceManagementStateAnnotation]
+	if exists && val == ManagementStateManual {
+		log.Info("skipping deprovisioning due to management-state annotation", "management-state", val)
+		// Remove AAP finalizer (this modifies metadata so we call Update)
+		if controllerutil.RemoveFinalizer(instance, cloudkitAAPComputeInstanceFinalizer) {
+			return ctrl.Result{}, r.Update(ctx, instance)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// If no provider configured, skip deprovisioning
+	if r.ProvisioningProvider == nil {
+		log.Info("no provisioning provider configured, skipping deprovisioning")
+		// Remove AAP finalizer (this modifies metadata so we call Update)
+		if controllerutil.RemoveFinalizer(instance, cloudkitAAPComputeInstanceFinalizer) {
+			return ctrl.Result{}, r.Update(ctx, instance)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Check if we already have a job ID
+	if instance.Status.DeprovisionJobID == "" {
+		// No job yet, trigger deprovisioning
+		log.Info("triggering deprovisioning", "provider", r.ProvisioningProvider.Name())
+		jobID, err := r.ProvisioningProvider.TriggerDeprovision(ctx, instance)
+		if err != nil {
+			// Check if this is a rate limit error
+			var rateLimitErr *provisioning.RateLimitError
+			if errors.As(err, &rateLimitErr) {
+				log.Info("deprovisioning request rate-limited, will retry", "retryAfter", rateLimitErr.RetryAfter)
+				return ctrl.Result{RequeueAfter: rateLimitErr.RetryAfter}, nil
+			}
+
+			// Actual error - mark as failed
+			log.Error(err, "failed to trigger deprovisioning")
+			instance.Status.DeprovisionJobState = string(provisioning.JobStateFailed)
+			instance.Status.DeprovisionJobMessage = fmt.Sprintf("Failed to trigger deprovisioning: %v", err)
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+
+		instance.Status.DeprovisionJobID = jobID
+		instance.Status.DeprovisionJobState = string(provisioning.JobStatePending)
+		instance.Status.DeprovisionJobMessage = "Deprovisioning job triggered"
+		log.Info("deprovisioning job triggered", "jobID", jobID)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// We have a job ID, check its status
+	status, err := r.ProvisioningProvider.GetDeprovisionStatus(ctx, instance.Status.DeprovisionJobID)
+	if err != nil {
+		log.Error(err, "failed to get deprovision job status", "jobID", instance.Status.DeprovisionJobID)
+		instance.Status.DeprovisionJobMessage = fmt.Sprintf("Failed to get job status: %v", err)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// Update status fields (main reconcile loop will persist these)
+	instance.Status.DeprovisionJobState = string(status.State)
+	instance.Status.DeprovisionJobMessage = status.Message
+	if status.ErrorDetails != "" {
+		instance.Status.DeprovisionJobMessage = fmt.Sprintf("%s: %s", status.Message, status.ErrorDetails)
+	}
+
+	// If job is still running, requeue
+	if !status.State.IsTerminal() {
+		log.Info("deprovision job still running", "jobID", instance.Status.DeprovisionJobID, "state", status.State)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// Job is complete - remove AAP finalizer regardless of success/failure (modifies metadata)
+	if controllerutil.RemoveFinalizer(instance, cloudkitAAPComputeInstanceFinalizer) {
+		if err := r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	if status.State.IsSuccessful() {
+		log.Info("deprovision job succeeded", "jobID", instance.Status.DeprovisionJobID)
+		return ctrl.Result{}, nil
+	}
+
+	// Job failed - log but continue with deletion
+	log.Info("deprovision job failed but allowing deletion to proceed", "jobID", instance.Status.DeprovisionJobID, "message", instance.Status.DeprovisionJobMessage)
+	return ctrl.Result{}, nil
+}
+
 func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Request, instance *v1alpha1.ComputeInstance) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
@@ -261,33 +440,14 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 	if instance.Status.DesiredConfigVersion == instance.Status.ReconciledConfigVersion {
 		instance.Status.Phase = v1alpha1.ComputeInstancePhaseReady
 		instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProgressing, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
-		r.webhookClient.ResetCache()
 		return ctrl.Result{}, nil
 	}
 
 	instance.Status.Phase = v1alpha1.ComputeInstancePhaseProgressing
 	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProgressing, metav1.ConditionTrue, "Applying configuration", v1alpha1.ReasonAsExpected)
 
-	if url := r.CreateComputeInstanceWebhook; url != "" {
-		val, exists := instance.Annotations[cloudkitComputeInstanceManagementStateAnnotation]
-		if exists && val == ManagementStateManual {
-			log.Info("not triggering create webhook due to management-state annotation", "url", url, "management-state", val)
-		} else {
-			remainingTime, err := r.webhookClient.TriggerWebhook(ctx, url, instance)
-			if err != nil {
-				log.Error(err, "failed to trigger webhook", "url", url, "error", err)
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-
-			// Verify if we are within the minimum request window
-			if remainingTime != 0 {
-				log.Info("request is within minimum request window", "url", url)
-				return ctrl.Result{RequeueAfter: remainingTime}, nil
-			}
-		}
-	}
-
-	return ctrl.Result{}, nil
+	// Handle provisioning via provider abstraction
+	return r.handleProvisioning(ctx, instance)
 }
 
 func (r *ComputeInstanceReconciler) handleDelete(ctx context.Context, _ ctrl.Request, instance *v1alpha1.ComputeInstance) (ctrl.Result, error) {
@@ -301,25 +461,9 @@ func (r *ComputeInstanceReconciler) handleDelete(ctx context.Context, _ ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	// AAP Finalizer is here, trigger deletion webhook
+	// AAP Finalizer is here, trigger deprovisioning via provider
 	if controllerutil.ContainsFinalizer(instance, cloudkitAAPComputeInstanceFinalizer) {
-		if url := r.DeleteComputeInstanceWebhook; url != "" {
-			val, exists := instance.Annotations[cloudkitComputeInstanceManagementStateAnnotation]
-			if exists && val == ManagementStateManual {
-				log.Info("not triggering delete webhook due to management-state annotation", "url", url, "management-state", val)
-			} else {
-				remainingTime, err := r.webhookClient.TriggerWebhook(ctx, url, instance)
-				if err != nil {
-					log.Error(err, "failed to trigger webhook", "url", url, "error", err)
-					return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-				}
-
-				if remainingTime != 0 {
-					return ctrl.Result{RequeueAfter: remainingTime}, nil
-				}
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.handleDeprovisioning(ctx, instance)
 	}
 
 	// Let this CR be deleted
