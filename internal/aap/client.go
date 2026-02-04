@@ -12,12 +12,12 @@ import (
 )
 
 const (
-	// apiVersion is the AAP API version path
-	apiVersion = "api/v2"
+	// APIVersion is the AAP API version path
+	APIVersion = "v2"
 
 	// AAP template endpoint paths
-	jobTemplatesEndpoint         = "job_templates"
-	workflowJobTemplatesEndpoint = "workflow_job_templates"
+	JobTemplatesEndpoint         = "job_templates"
+	WorkflowJobTemplatesEndpoint = "workflow_job_templates"
 )
 
 // Client provides an HTTP client for interacting with AAP (Ansible Automation Platform) REST API.
@@ -88,7 +88,7 @@ type Template struct {
 
 // LaunchJobTemplate launches a job template and returns the job ID.
 func (c *Client) LaunchJobTemplate(ctx context.Context, req LaunchJobTemplateRequest) (*LaunchJobTemplateResponse, error) {
-	url := fmt.Sprintf("%s/%s/job_templates/%s/launch/", c.baseURL, apiVersion, req.TemplateName)
+	url := fmt.Sprintf("%s/%s/job_templates/%s/launch/", c.baseURL, APIVersion, req.TemplateName)
 
 	payload := map[string]interface{}{
 		"extra_vars": req.ExtraVars,
@@ -109,7 +109,7 @@ func (c *Client) LaunchJobTemplate(ctx context.Context, req LaunchJobTemplateReq
 
 // LaunchWorkflowTemplate launches a workflow template and returns the job ID.
 func (c *Client) LaunchWorkflowTemplate(ctx context.Context, req LaunchWorkflowTemplateRequest) (*LaunchWorkflowTemplateResponse, error) {
-	url := fmt.Sprintf("%s/%s/workflow_job_templates/%s/launch/", c.baseURL, apiVersion, req.TemplateName)
+	url := fmt.Sprintf("%s/%s/workflow_job_templates/%s/launch/", c.baseURL, APIVersion, req.TemplateName)
 
 	payload := map[string]interface{}{
 		"extra_vars": req.ExtraVars,
@@ -130,7 +130,7 @@ func (c *Client) LaunchWorkflowTemplate(ctx context.Context, req LaunchWorkflowT
 
 // GetJob retrieves job status by job ID.
 func (c *Client) GetJob(ctx context.Context, jobID int) (*Job, error) {
-	url := fmt.Sprintf("%s/%s/jobs/%d/", c.baseURL, apiVersion, jobID)
+	url := fmt.Sprintf("%s/%s/jobs/%d/", c.baseURL, APIVersion, jobID)
 
 	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -148,7 +148,7 @@ func (c *Client) GetJob(ctx context.Context, jobID int) (*Job, error) {
 // getTemplateFromEndpoint queries a specific AAP template endpoint by name.
 // Returns the template if found, or an error if not found or request failed.
 func (c *Client) getTemplateFromEndpoint(ctx context.Context, templateEndpoint, templateName string, templateType TemplateType) (*Template, error) {
-	url := fmt.Sprintf("%s/%s/%s/?name=%s", c.baseURL, apiVersion, templateEndpoint, templateName)
+	url := fmt.Sprintf("%s/%s/%s/?name=%s", c.baseURL, APIVersion, templateEndpoint, templateName)
 	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -176,18 +176,18 @@ func (c *Client) getTemplateFromEndpoint(ctx context.Context, templateEndpoint, 
 // This method does not use caching.
 func (c *Client) GetTemplateByName(ctx context.Context, templateName string) (*Template, error) {
 	// Try job template first
-	template, lookupErr := c.getTemplateFromEndpoint(ctx, jobTemplatesEndpoint, templateName, TemplateTypeJob)
+	template, lookupErr := c.getTemplateFromEndpoint(ctx, JobTemplatesEndpoint, templateName, TemplateTypeJob)
 	if lookupErr == nil {
 		return template, nil
 	}
 
 	// Try workflow template
-	template, lookupErr = c.getTemplateFromEndpoint(ctx, workflowJobTemplatesEndpoint, templateName, TemplateTypeWorkflow)
+	template, lookupErr = c.getTemplateFromEndpoint(ctx, WorkflowJobTemplatesEndpoint, templateName, TemplateTypeWorkflow)
 	if lookupErr == nil {
 		return template, nil
 	}
 
-	return nil, fmt.Errorf("template %s not found as %s or %s", templateName, jobTemplatesEndpoint, workflowJobTemplatesEndpoint)
+	return nil, fmt.Errorf("template %s not found as %s or %s", templateName, JobTemplatesEndpoint, WorkflowJobTemplatesEndpoint)
 }
 
 // GetTemplate retrieves a template by name with caching.

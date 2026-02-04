@@ -3,6 +3,7 @@ package aap_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,7 +41,7 @@ var _ = Describe("Client", func() {
 		Context("when request succeeds", func() {
 			BeforeEach(func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					Expect(r.URL.Path).To(Equal("/api/v2/job_templates/test-template/launch/"))
+					Expect(r.URL.Path).To(Equal(fmt.Sprintf("/%s/%s/test-template/launch/", aap.APIVersion, aap.JobTemplatesEndpoint)))
 					Expect(r.Method).To(Equal(http.MethodPost))
 					Expect(r.Header.Get("Content-Type")).To(Equal("application/json"))
 					Expect(r.Header.Get("Authorization")).To(ContainSubstring("Bearer test-token"))
@@ -86,7 +87,7 @@ var _ = Describe("Client", func() {
 		Context("when request succeeds", func() {
 			BeforeEach(func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					Expect(r.URL.Path).To(Equal("/api/v2/workflow_job_templates/test-workflow/launch/"))
+					Expect(r.URL.Path).To(Equal(fmt.Sprintf("/%s/%s/test-workflow/launch/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint)))
 					Expect(r.Method).To(Equal(http.MethodPost))
 
 					w.WriteHeader(http.StatusOK)
@@ -112,7 +113,7 @@ var _ = Describe("Client", func() {
 		Context("when job exists", func() {
 			BeforeEach(func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					Expect(r.URL.Path).To(Equal("/api/v2/jobs/789/"))
+					Expect(r.URL.Path).To(Equal(fmt.Sprintf("/%s/jobs/789/", aap.APIVersion)))
 					Expect(r.Method).To(Equal(http.MethodGet))
 
 					w.WriteHeader(http.StatusOK)
@@ -155,7 +156,7 @@ var _ = Describe("Client", func() {
 		Context("when template is a job_template", func() {
 			BeforeEach(func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/api/v2/job_templates/" && r.URL.Query().Get("name") == "my-job" {
+					if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-job" {
 						w.WriteHeader(http.StatusOK)
 						json.NewEncoder(w).Encode(map[string]interface{}{
 							"count": 1,
@@ -183,7 +184,7 @@ var _ = Describe("Client", func() {
 		Context("when template is a workflow_job_template", func() {
 			BeforeEach(func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/api/v2/workflow_job_templates/" && r.URL.Query().Get("name") == "my-workflow" {
+					if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-workflow" {
 						w.WriteHeader(http.StatusOK)
 						json.NewEncoder(w).Encode(map[string]interface{}{
 							"count": 1,
@@ -233,7 +234,7 @@ var _ = Describe("Client", func() {
 				requestCount = 0
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					requestCount++
-					if r.URL.Path == "/api/v2/job_templates/" && r.URL.Query().Get("name") == "cached-job" {
+					if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "cached-job" {
 						w.WriteHeader(http.StatusOK)
 						json.NewEncoder(w).Encode(map[string]interface{}{
 							"count": 1,
@@ -272,7 +273,7 @@ var _ = Describe("Client", func() {
 			requestCount = 0
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestCount++
-				if r.URL.Path == "/api/v2/job_templates/" && r.URL.Query().Get("name") == "my-job" {
+				if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-job" {
 					w.WriteHeader(http.StatusOK)
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"count": 1,
@@ -311,7 +312,7 @@ var _ = Describe("Client", func() {
 			requestCount = 0
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestCount++
-				if r.URL.Path == "/api/v2/job_templates/" && r.URL.Query().Get("name") == "job1" {
+				if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "job1" {
 					w.WriteHeader(http.StatusOK)
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"count": 1,
@@ -319,7 +320,7 @@ var _ = Describe("Client", func() {
 							{"id": 1, "name": "job1"},
 						},
 					})
-				} else if r.URL.Path == "/api/v2/workflow_job_templates/" && r.URL.Query().Get("name") == "workflow1" {
+				} else if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint) && r.URL.Query().Get("name") == "workflow1" {
 					w.WriteHeader(http.StatusOK)
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"count": 1,
