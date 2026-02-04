@@ -317,6 +317,16 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 		return ctrl.Result{}, nil
 	}
 
+	// Ensure provision job is canceled/terminated before starting deprovision
+	shouldProceed, result, err := r.ensureProvisionJobTerminated(ctx, instance)
+	if err != nil {
+		return result, err
+	}
+	if !shouldProceed {
+		// Need to requeue and wait for provision job to terminate
+		return result, nil
+	}
+
 	// Check if we already have a job ID
 	if instance.Status.DeprovisionJobID == "" {
 		// No job yet, trigger deprovisioning
@@ -389,6 +399,42 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 	// Job failed - log but continue with deletion
 	log.Info("deprovision job failed but allowing deletion to proceed", "jobID", instance.Status.DeprovisionJobID, "message", instance.Status.DeprovisionJobMessage)
 	return ctrl.Result{}, nil
+}
+
+// ensureProvisionJobTerminated ensures any running provision job is canceled before deprovisioning.
+// Returns shouldProceed=true if ready to continue with deprovisioning, false if need to requeue.
+func (r *ComputeInstanceReconciler) ensureProvisionJobTerminated(ctx context.Context, instance *v1alpha1.ComputeInstance) (shouldProceed bool, result ctrl.Result, err error) {
+	log := ctrllog.FromContext(ctx)
+
+	// No provision job, safe to proceed
+	if instance.Status.ProvisionJobID == "" {
+		return true, ctrl.Result{}, nil
+	}
+
+	jobState := provisioning.JobState(instance.Status.ProvisionJobState)
+
+	// Provision job already in terminal state, safe to proceed
+	if jobState.IsTerminal() {
+		log.Info("provision job already in terminal state, proceeding with deprovision",
+			"jobID", instance.Status.ProvisionJobID, "state", jobState)
+		return true, ctrl.Result{}, nil
+	}
+
+	// Provision job is still running - cancel it
+	log.Info("provision job still running, canceling before deprovision",
+		"jobID", instance.Status.ProvisionJobID, "state", jobState)
+
+	if err := r.ProvisioningProvider.CancelProvision(ctx, instance.Status.ProvisionJobID); err != nil {
+		log.Error(err, "failed to cancel provision job, will retry",
+			"jobID", instance.Status.ProvisionJobID)
+		// Requeue to retry cancellation
+		return false, ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// Cancellation initiated - requeue to poll status on next reconcile
+	log.Info("provision job cancellation initiated, requeueing to check status",
+		"jobID", instance.Status.ProvisionJobID)
+	return false, ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 }
 
 func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Request, instance *v1alpha1.ComputeInstance) (ctrl.Result, error) {

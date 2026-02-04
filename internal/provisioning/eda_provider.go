@@ -79,6 +79,13 @@ func (p *EDAProvider) GetProvisionStatus(ctx context.Context, jobID string) (Pro
 	}, nil
 }
 
+// CancelProvision is a no-op for EDA provider as it doesn't support job cancellation.
+// EDA workflows are fire-and-forget and cannot be canceled through the provider.
+func (p *EDAProvider) CancelProvision(ctx context.Context, jobID string) error {
+	// EDA provider does not support cancellation
+	return nil
+}
+
 // TriggerDeprovision triggers deprovisioning via EDA webhook.
 // Returns the resource name as job ID since EDA doesn't provide a real job ID.
 // Returns RateLimitError if the request is rate-limited.

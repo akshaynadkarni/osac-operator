@@ -78,6 +78,16 @@ func (p *controllableProvider) GetProvisionStatus(ctx context.Context, jobID str
 	}, nil
 }
 
+func (p *controllableProvider) CancelProvision(ctx context.Context, jobID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// In tests, immediately transition to canceled state
+	p.provisionJobState = provisioning.JobStateCanceled
+	p.provisionJobMsg = "Job canceled"
+	return nil
+}
+
 func (p *controllableProvider) TriggerDeprovision(ctx context.Context, resource client.Object) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -163,7 +173,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
-			defer k8sClient.Delete(ctx, instance)
+			DeferCleanup(k8sClient.Delete, ctx, instance)
 
 			// First call should trigger the job
 			result, err := reconciler.handleProvisioning(ctx, instance)
@@ -197,7 +207,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 
 			result, err = reconciler.handleProvisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Update status
 			Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
@@ -223,7 +233,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
-			defer k8sClient.Delete(ctx, instance)
+			DeferCleanup(k8sClient.Delete, ctx, instance)
 
 			// Trigger the job
 			_, err := reconciler.handleProvisioning(ctx, instance)
@@ -277,7 +287,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 
 			result, err = reconciler.handleDeprovisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Verify finalizer was removed
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: instanceName, Namespace: testNamespace}, instance)).To(Succeed())
@@ -335,7 +345,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
-			defer k8sClient.Delete(ctx, instance)
+			DeferCleanup(k8sClient.Delete, ctx, instance)
 
 			// Trigger job
 			_, err := reconciler.handleProvisioning(ctx, instance)
@@ -358,7 +368,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 			provider.setProvisionJobState(provisioning.JobStateSucceeded, "Job completed")
 			result, err := reconciler.handleProvisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			Expect(instance.Status.ProvisionJobState).To(Equal(string(provisioning.JobStateSucceeded)))
 		})

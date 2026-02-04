@@ -1,3 +1,4 @@
+// Package aap provides a client for interacting with the Ansible Automation Platform (AAP) REST API.
 package aap
 
 import (
@@ -129,8 +130,8 @@ func (c *Client) LaunchWorkflowTemplate(ctx context.Context, req LaunchWorkflowT
 }
 
 // GetJob retrieves job status by job ID.
-func (c *Client) GetJob(ctx context.Context, jobID int) (*Job, error) {
-	url := fmt.Sprintf("%s/%s/jobs/%d/", c.baseURL, APIVersion, jobID)
+func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
+	url := fmt.Sprintf("%s/%s/jobs/%s/", c.baseURL, APIVersion, jobID)
 
 	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -143,6 +144,45 @@ func (c *Client) GetJob(ctx context.Context, jobID int) (*Job, error) {
 	}
 
 	return &job, nil
+}
+
+// CanCancelJobResponse contains the response from checking if a job can be canceled.
+type CanCancelJobResponse struct {
+	CanCancel bool `json:"can_cancel"`
+}
+
+// CanCancelJob checks if a job can be canceled.
+// Returns true if the job is in a state that allows cancellation (pending/running).
+func (c *Client) CanCancelJob(ctx context.Context, jobID string) (bool, error) {
+	url := fmt.Sprintf("%s/%s/jobs/%s/cancel/", c.baseURL, APIVersion, jobID)
+
+	resp, err := c.doRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if job can be canceled: %w", err)
+	}
+
+	var canCancelResp CanCancelJobResponse
+	if err := json.Unmarshal(resp, &canCancelResp); err != nil {
+		return false, fmt.Errorf("failed to parse can_cancel response: %w", err)
+	}
+
+	return canCancelResp.CanCancel, nil
+}
+
+// CancelJob cancels a pending or running job.
+// Returns nil if successful (HTTP 202), or an error if the job cannot be canceled (HTTP 405).
+// Note: When canceling a job, AAP issues a SIGINT to the ansible-playbook process,
+// which causes Ansible to stop dispatching new tasks. Tasks already dispatched to
+// remote hosts will run to completion.
+func (c *Client) CancelJob(ctx context.Context, jobID string) error {
+	url := fmt.Sprintf("%s/%s/jobs/%s/cancel/", c.baseURL, APIVersion, jobID)
+
+	_, err := c.doRequest(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to cancel job: %w", err)
+	}
+
+	return nil
 }
 
 // getTemplateFromEndpoint queries a specific AAP template endpoint by name.
@@ -246,7 +286,9 @@ func (c *Client) doRequest(ctx context.Context, method, url string, payload inte
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

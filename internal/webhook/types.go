@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package webhook provides types and utilities for triggering Event-Driven Ansible (EDA) webhooks.
 package webhook
 
 // Resource represents any resource that can be sent via webhook.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -16,7 +17,8 @@ type AAPClient interface {
 	GetTemplate(ctx context.Context, templateName string) (*aap.Template, error)
 	LaunchJobTemplate(ctx context.Context, req aap.LaunchJobTemplateRequest) (*aap.LaunchJobTemplateResponse, error)
 	LaunchWorkflowTemplate(ctx context.Context, req aap.LaunchWorkflowTemplateRequest) (*aap.LaunchWorkflowTemplateResponse, error)
-	GetJob(ctx context.Context, jobID int) (*aap.Job, error)
+	GetJob(ctx context.Context, jobID string) (*aap.Job, error)
+	CancelJob(ctx context.Context, jobID string) error
 }
 
 // AAPProvider implements ProvisioningProvider using direct AAP REST API integration.
@@ -86,6 +88,36 @@ func (p *AAPProvider) GetProvisionStatus(ctx context.Context, jobID string) (Pro
 	return p.getJobStatus(ctx, jobID)
 }
 
+// CancelProvision attempts to cancel a running provision job via AAP API.
+// Returns nil if cancellation was initiated successfully or if the job is already in a terminal state (HTTP 405).
+// Note: Cancellation is asynchronous. The job status should be polled to confirm termination.
+func (p *AAPProvider) CancelProvision(ctx context.Context, jobID string) error {
+	// Attempt to cancel the job
+	// HTTP 202 → cancellation initiated
+	// HTTP 405 → job already terminal (not an error)
+	err := p.client.CancelJob(ctx, jobID)
+	if err != nil {
+		// Check if error is "Method not allowed" (405) - indicates job already terminal
+		if isMethodNotAllowedError(err) {
+			// Job is already in terminal state, nothing to cancel
+			return nil
+		}
+		return fmt.Errorf("failed to cancel job: %w", err)
+	}
+
+	return nil
+}
+
+// isMethodNotAllowedError checks if the error is an HTTP 405 error from AAP.
+func isMethodNotAllowedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	// AAP returns "received non-success status code 405: ..." when job cannot be canceled
+	return strings.Contains(errMsg, "405") || strings.Contains(errMsg, "Method \"POST\" not allowed")
+}
+
 // TriggerDeprovision triggers deprovisioning via AAP API.
 // Autodetects whether the template is a job_template or workflow_job_template.
 func (p *AAPProvider) TriggerDeprovision(ctx context.Context, resource client.Object) (string, error) {
@@ -144,12 +176,7 @@ func (p *AAPProvider) Name() string {
 
 // getJobStatus retrieves job status from AAP and converts it to ProvisionStatus.
 func (p *AAPProvider) getJobStatus(ctx context.Context, jobID string) (ProvisionStatus, error) {
-	jobIDInt, err := strconv.Atoi(jobID)
-	if err != nil {
-		return ProvisionStatus{}, fmt.Errorf("invalid job ID: %w", err)
-	}
-
-	job, err := p.client.GetJob(ctx, jobIDInt)
+	job, err := p.client.GetJob(ctx, jobID)
 	if err != nil {
 		return ProvisionStatus{}, fmt.Errorf("failed to get job: %w", err)
 	}
@@ -175,8 +202,10 @@ func mapAAPStatusToJobState(aapStatus string) JobState {
 	switch aapStatus {
 	case "successful":
 		return JobStateSucceeded
-	case "failed", "error", "canceled":
+	case "failed", "error":
 		return JobStateFailed
+	case "canceled":
+		return JobStateCanceled
 	case "pending", "waiting", "running":
 		return JobStateRunning
 	default:

@@ -3,6 +3,7 @@ package provisioning_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,7 +19,8 @@ type mockAAPClient struct {
 	getTemplateFunc            func(ctx context.Context, templateName string) (*aap.Template, error)
 	launchJobTemplateFunc      func(ctx context.Context, req aap.LaunchJobTemplateRequest) (*aap.LaunchJobTemplateResponse, error)
 	launchWorkflowTemplateFunc func(ctx context.Context, req aap.LaunchWorkflowTemplateRequest) (*aap.LaunchWorkflowTemplateResponse, error)
-	getJobFunc                 func(ctx context.Context, jobID int) (*aap.Job, error)
+	getJobFunc                 func(ctx context.Context, jobID string) (*aap.Job, error)
+	cancelJobFunc              func(ctx context.Context, jobID string) error
 }
 
 func (m *mockAAPClient) GetTemplate(ctx context.Context, templateName string) (*aap.Template, error) {
@@ -42,16 +44,28 @@ func (m *mockAAPClient) LaunchWorkflowTemplate(ctx context.Context, req aap.Laun
 	return &aap.LaunchWorkflowTemplateResponse{JobID: 456}, nil
 }
 
-func (m *mockAAPClient) GetJob(ctx context.Context, jobID int) (*aap.Job, error) {
+func (m *mockAAPClient) GetJob(ctx context.Context, jobID string) (*aap.Job, error) {
 	if m.getJobFunc != nil {
 		return m.getJobFunc(ctx, jobID)
 	}
+	// Convert jobID string to int for the ID field
+	var id int
+	if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+		id = 123 // default
+	}
 	return &aap.Job{
-		ID:       jobID,
+		ID:       id,
 		Status:   "successful",
 		Started:  time.Now().UTC(),
 		Finished: time.Now().UTC().Add(time.Minute),
 	}, nil
+}
+
+func (m *mockAAPClient) CancelJob(ctx context.Context, jobID string) error {
+	if m.cancelJobFunc != nil {
+		return m.cancelJobFunc(ctx, jobID)
+	}
+	return nil
 }
 
 // extractEDAPayload extracts the payload from EDA event structure in extra_vars.
@@ -185,9 +199,13 @@ var _ = Describe("AAPProvider", func() {
 
 		Context("when job is successful", func() {
 			BeforeEach(func() {
-				aapClient.getJobFunc = func(ctx context.Context, jobID int) (*aap.Job, error) {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
 					return &aap.Job{
-						ID:       jobID,
+						ID:       id,
 						Status:   "successful",
 						Started:  time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
 						Finished: time.Date(2024, 1, 1, 12, 5, 0, 0, time.UTC),
@@ -206,9 +224,13 @@ var _ = Describe("AAPProvider", func() {
 
 		Context("when job is running", func() {
 			BeforeEach(func() {
-				aapClient.getJobFunc = func(ctx context.Context, jobID int) (*aap.Job, error) {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
 					return &aap.Job{
-						ID:      jobID,
+						ID:      id,
 						Status:  "running",
 						Started: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
 					}, nil
@@ -224,9 +246,13 @@ var _ = Describe("AAPProvider", func() {
 
 		Context("when job failed with traceback", func() {
 			BeforeEach(func() {
-				aapClient.getJobFunc = func(ctx context.Context, jobID int) (*aap.Job, error) {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
 					return &aap.Job{
-						ID:              jobID,
+						ID:              id,
 						Status:          "failed",
 						Started:         time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
 						Finished:        time.Date(2024, 1, 1, 12, 1, 0, 0, time.UTC),
@@ -244,16 +270,22 @@ var _ = Describe("AAPProvider", func() {
 		})
 
 		Context("when job ID is invalid", func() {
+			BeforeEach(func() {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					return nil, errors.New("received non-success status code 404: job not found")
+				}
+			})
+
 			It("should return error", func() {
 				_, err := provider.GetProvisionStatus(ctx, "invalid")
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("invalid job ID"))
+				Expect(err.Error()).To(ContainSubstring("failed to get job"))
 			})
 		})
 
 		Context("when AAP API fails", func() {
 			BeforeEach(func() {
-				aapClient.getJobFunc = func(ctx context.Context, jobID int) (*aap.Job, error) {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
 					return nil, errors.New("AAP connection error")
 				}
 			})
@@ -302,9 +334,13 @@ var _ = Describe("AAPProvider", func() {
 	Describe("GetDeprovisionStatus", func() {
 		BeforeEach(func() {
 			provider = provisioning.NewAAPProvider(aapClient, "provision-job", "deprovision-job")
-			aapClient.getJobFunc = func(ctx context.Context, jobID int) (*aap.Job, error) {
+			aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+				var id int
+				if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+					id = 888 // default
+				}
 				return &aap.Job{
-					ID:       jobID,
+					ID:       id,
 					Status:   "successful",
 					Started:  time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
 					Finished: time.Date(2024, 1, 1, 12, 3, 0, 0, time.UTC),

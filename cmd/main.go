@@ -94,9 +94,13 @@ func init() {
 }
 
 // createEDAProvider creates and validates EDA webhook provider configuration.
-func createEDAProvider(createWebhook, deleteWebhook string, minimumRequestInterval time.Duration) (provisioning.ProvisioningProvider, time.Duration, error) {
+func createEDAProvider(
+	createWebhook, deleteWebhook string,
+	minimumRequestInterval time.Duration,
+) (provisioning.ProvisioningProvider, time.Duration, error) {
 	if createWebhook == "" || deleteWebhook == "" {
-		return nil, 0, fmt.Errorf("EDA provider requires both %s and %s", envComputeInstanceCreateWebhook, envComputeInstanceDeleteWebhook)
+		return nil, 0, fmt.Errorf("EDA provider requires both %s and %s",
+			envComputeInstanceCreateWebhook, envComputeInstanceDeleteWebhook)
 	}
 
 	webhookClient := controller.NewWebhookClient(10*time.Second, minimumRequestInterval)
@@ -107,7 +111,9 @@ func createEDAProvider(createWebhook, deleteWebhook string, minimumRequestInterv
 }
 
 // createAAPProvider creates and validates AAP direct provider configuration.
-func createAAPProvider(aapURL, aapToken, provisionTemplate, deprovisionTemplate string) (provisioning.ProvisioningProvider, time.Duration, error) {
+func createAAPProvider(
+	aapURL, aapToken, provisionTemplate, deprovisionTemplate string,
+) (provisioning.ProvisioningProvider, time.Duration, error) {
 	if aapURL == "" || aapToken == "" {
 		return nil, 0, fmt.Errorf("AAP provider requires both %s and %s", envAAPURL, envAAPToken)
 	}
@@ -118,7 +124,8 @@ func createAAPProvider(aapURL, aapToken, provisionTemplate, deprovisionTemplate 
 		if interval, err := time.ParseDuration(pollIntervalStr); err == nil {
 			statusPollInterval = interval
 		} else {
-			setupLog.Error(err, "invalid AAP status poll interval, using default", "interval", pollIntervalStr, "default", statusPollInterval)
+			setupLog.Error(err, "invalid AAP status poll interval, using default",
+				"interval", pollIntervalStr, "default", statusPollInterval)
 		}
 	}
 
@@ -362,7 +369,8 @@ func main() {
 	switch providerType {
 	case providerTypeEDA:
 		var err error
-		computeInstanceProvider, statusPollInterval, err = createEDAProvider(createWebhook, deleteWebhook, minimumRequestInterval)
+		computeInstanceProvider, statusPollInterval, err = createEDAProvider(
+			createWebhook, deleteWebhook, minimumRequestInterval)
 		if err != nil {
 			setupLog.Error(err, "failed to create EDA provider")
 			os.Exit(1)
@@ -370,7 +378,8 @@ func main() {
 
 	case providerTypeAAP:
 		var err error
-		computeInstanceProvider, statusPollInterval, err = createAAPProvider(aapURL, aapToken, provisionTemplate, deprovisionTemplate)
+		computeInstanceProvider, statusPollInterval, err = createAAPProvider(
+			aapURL, aapToken, provisionTemplate, deprovisionTemplate)
 		if err != nil {
 			setupLog.Error(err, "failed to create AAP provider")
 			os.Exit(1)

@@ -1,3 +1,4 @@
+// Package provisioning provides an abstraction layer for infrastructure provisioning through multiple backends.
 package provisioning
 
 import (
@@ -18,6 +19,14 @@ type ProvisioningProvider interface {
 	// GetProvisionStatus checks the status of a provisioning job.
 	// Returns current status and whether the job is complete.
 	GetProvisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error)
+
+	// CancelProvision attempts to cancel a running provision job.
+	// Returns nil if cancellation was initiated successfully.
+	// Note: Cancellation is asynchronous - the job status should be polled
+	// with GetProvisionStatus to confirm the job reached a terminal state.
+	// AAP sends SIGINT to ansible-playbook, which stops dispatching new tasks,
+	// but already-dispatched tasks will run to completion.
+	CancelProvision(ctx context.Context, jobID string) error
 
 	// TriggerDeprovision starts deprovisioning for a resource.
 	// Returns a job ID that can be used to track status.
@@ -76,11 +85,14 @@ const (
 
 	// JobStateFailed indicates the job failed.
 	JobStateFailed JobState = "Failed"
+
+	// JobStateCanceled indicates the job was canceled before completion.
+	JobStateCanceled JobState = "Canceled"
 )
 
-// IsTerminal returns true if the job state is in a terminal state (succeeded or failed).
+// IsTerminal returns true if the job state is in a terminal state (succeeded, failed, or canceled).
 func (s JobState) IsTerminal() bool {
-	return s == JobStateSucceeded || s == JobStateFailed
+	return s == JobStateSucceeded || s == JobStateFailed || s == JobStateCanceled
 }
 
 // IsSuccessful returns true if the job completed successfully.

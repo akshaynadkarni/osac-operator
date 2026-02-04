@@ -57,6 +57,11 @@ func (m *mockProvisioningProvider) GetProvisionStatus(ctx context.Context, jobID
 	}, nil
 }
 
+func (m *mockProvisioningProvider) CancelProvision(ctx context.Context, jobID string) error {
+	// Mock implementation - always succeeds
+	return nil
+}
+
 func (m *mockProvisioningProvider) TriggerDeprovision(ctx context.Context, resource client.Object) (string, error) {
 	if m.triggerDeprovisionFunc != nil {
 		return m.triggerDeprovisionFunc(ctx, resource)
@@ -187,7 +192,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 
 			result, err := reconciler.handleProvisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 			Expect(instance.Status.ProvisionJobState).To(Equal(string(provisioning.JobStateSucceeded)))
 			Expect(instance.Status.ReconciledConfigVersion).To(Equal("v1.2.3"))
@@ -209,7 +214,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 
 			result, err := reconciler.handleProvisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(instance.Status.ProvisionJobState).To(Equal(string(provisioning.JobStateFailed)))
 			Expect(instance.Status.ProvisionJobMessage).To(ContainSubstring("Job failed"))
 			Expect(instance.Status.ProvisionJobMessage).To(ContainSubstring("Playbook execution failed"))
@@ -236,7 +241,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 
 			result, err := reconciler.handleProvisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(instance.Status.ProvisionJobID).To(BeEmpty())
 		})
 
@@ -249,7 +254,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 
 			result, err := reconciler.handleProvisioning(ctx, instance)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(instance.Status.ProvisionJobID).To(BeEmpty())
 		})
 	})
