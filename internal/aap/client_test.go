@@ -122,7 +122,7 @@ var _ = Describe("Client", func() {
 						"status":           "successful",
 						"started":          time.Now().UTC().Format(time.RFC3339),
 						"finished":         time.Now().UTC().Add(time.Minute).Format(time.RFC3339),
-						"extra_vars":       map[string]interface{}{"key": "value"},
+						"extra_vars":       "{\"key\": \"value\"}",
 						"result_traceback": "",
 					})
 				}))
