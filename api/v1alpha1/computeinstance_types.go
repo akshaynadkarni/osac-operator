@@ -154,10 +154,10 @@ type ComputeInstanceStatus struct {
 	ProvisionJobID string `json:"provisionJobID,omitempty"`
 
 	// ProvisionJobState is the current state of the provisioning job.
-	// Valid values: Pending, Running, Succeeded, Failed
+	// Valid values: Pending, Running, Succeeded, Failed, Canceled
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed;Canceled
 	ProvisionJobState string `json:"provisionJobState,omitempty"`
 
 	// ProvisionJobMessage provides human-readable status or error information for the provisioning job.
@@ -172,10 +172,10 @@ type ComputeInstanceStatus struct {
 	DeprovisionJobID string `json:"deprovisionJobID,omitempty"`
 
 	// DeprovisionJobState is the current state of the deprovisioning job.
-	// Valid values: Pending, Running, Succeeded, Failed
+	// Valid values: Pending, Running, Succeeded, Failed, Canceled
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed;Canceled
 	DeprovisionJobState string `json:"deprovisionJobState,omitempty"`
 
 	// DeprovisionJobMessage provides human-readable status or error information for the deprovisioning job.
