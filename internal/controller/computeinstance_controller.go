@@ -414,18 +414,32 @@ func (r *ComputeInstanceReconciler) ensureProvisionJobTerminated(ctx context.Con
 		return true, ctrl.Result{}, nil
 	}
 
-	jobState := provisioning.JobState(instance.Status.ProvisionJobState)
+	// Poll current job status from AAP (don't trust cached status during deletion)
+	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance.Status.ProvisionJobID)
+	if err != nil {
+		log.Error(err, "failed to get provision job status, will retry",
+			"jobID", instance.Status.ProvisionJobID)
+		// Requeue to retry status check
+		return false, ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	// Update status fields with current state
+	instance.Status.ProvisionJobState = string(status.State)
+	instance.Status.ProvisionJobMessage = status.Message
+	if status.ErrorDetails != "" {
+		instance.Status.ProvisionJobMessage = fmt.Sprintf("%s: %s", status.Message, status.ErrorDetails)
+	}
 
 	// Provision job already in terminal state, safe to proceed
-	if jobState.IsTerminal() {
-		log.Info("provision job already in terminal state, proceeding with deprovision",
-			"jobID", instance.Status.ProvisionJobID, "state", jobState)
+	if status.State.IsTerminal() {
+		log.Info("provision job in terminal state, proceeding with deprovision",
+			"jobID", instance.Status.ProvisionJobID, "state", status.State)
 		return true, ctrl.Result{}, nil
 	}
 
 	// Provision job is still running - cancel it
 	log.Info("provision job still running, canceling before deprovision",
-		"jobID", instance.Status.ProvisionJobID, "state", jobState)
+		"jobID", instance.Status.ProvisionJobID, "state", status.State)
 
 	if err := r.ProvisioningProvider.CancelProvision(ctx, instance.Status.ProvisionJobID); err != nil {
 		log.Error(err, "failed to cancel provision job, will retry",
