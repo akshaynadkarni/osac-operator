@@ -433,10 +433,11 @@ var _ = Describe("Client", func() {
 				client = aap.NewClient(server.URL, "test-token")
 			})
 
-			It("should return error", func() {
+			It("should return MethodNotAllowedError", func() {
 				err := client.CancelJob(ctx, "456")
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("failed to cancel job"))
+				var methodNotAllowedErr *aap.MethodNotAllowedError
+				Expect(errors.As(err, &methodNotAllowedErr)).To(BeTrue())
 			})
 		})
 	})

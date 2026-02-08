@@ -23,6 +23,17 @@ func (e *NotFoundError) Error() string {
 	return fmt.Sprintf("resource not found: %s", e.Resource)
 }
 
+// MethodNotAllowedError indicates the requested operation is not allowed (HTTP 405).
+// For job cancellation, this typically means the job is already in a terminal state.
+type MethodNotAllowedError struct {
+	Operation string // e.g., "cancel job 123"
+	URL       string
+}
+
+func (e *MethodNotAllowedError) Error() string {
+	return fmt.Sprintf("method not allowed: %s", e.Operation)
+}
+
 const (
 	// APIVersion is the AAP API version path
 	APIVersion = "v2"
@@ -312,6 +323,13 @@ func (c *Client) doRequest(ctx context.Context, method, url string, payload any)
 			return nil, &NotFoundError{
 				Resource: url,
 				URL:      url,
+			}
+		}
+		// Return typed error for 405 Method Not Allowed
+		if resp.StatusCode == http.StatusMethodNotAllowed {
+			return nil, &MethodNotAllowedError{
+				Operation: fmt.Sprintf("%s %s", method, url),
+				URL:       url,
 			}
 		}
 		return nil, fmt.Errorf("received non-success status code %d: %s", resp.StatusCode, string(respBody))

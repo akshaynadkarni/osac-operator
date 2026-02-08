@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -100,7 +99,8 @@ func (p *AAPProvider) CancelProvision(ctx context.Context, jobID string) error {
 	err := p.client.CancelJob(ctx, jobID)
 	if err != nil {
 		// Check if error is "Method not allowed" (405) - indicates job already terminal
-		if isMethodNotAllowedError(err) {
+		var methodNotAllowedErr *aap.MethodNotAllowedError
+		if errors.As(err, &methodNotAllowedErr) {
 			// Job is already in terminal state, nothing to cancel
 			return nil
 		}
@@ -108,16 +108,6 @@ func (p *AAPProvider) CancelProvision(ctx context.Context, jobID string) error {
 	}
 
 	return nil
-}
-
-// isMethodNotAllowedError checks if the error is an HTTP 405 error from AAP.
-func isMethodNotAllowedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errMsg := err.Error()
-	// AAP returns "received non-success status code 405: ..." when job cannot be canceled
-	return strings.Contains(errMsg, "405") || strings.Contains(errMsg, "Method \"POST\" not allowed")
 }
 
 // TriggerDeprovision triggers deprovisioning via AAP API.
