@@ -117,6 +117,33 @@ func (p *controllableProvider) Name() string {
 	return provisioning.ProviderTypeAAP
 }
 
+func (p *controllableProvider) ShouldProceedWithDeprovision(ctx context.Context, resource client.Object, provisionJob *provisioning.ProvisionStatus) (bool, *provisioning.ProvisionStatus, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// No provision job, safe to proceed
+	if provisionJob == nil || provisionJob.JobID == "" {
+		return true, nil, nil
+	}
+
+	// Get current status
+	status := provisioning.ProvisionStatus{
+		JobID:   provisionJob.JobID,
+		State:   p.provisionJobState,
+		Message: p.provisionJobMsg,
+	}
+
+	// If terminal, proceed
+	if status.State.IsTerminal() {
+		return true, &status, nil
+	}
+
+	// Still running - cancel it
+	p.provisionJobState = provisioning.JobStateCanceled
+	p.provisionJobMsg = "Job canceled"
+	return false, &status, nil
+}
+
 // setProvisionJobState updates the provision job state (thread-safe)
 func (p *controllableProvider) setProvisionJobState(state provisioning.JobState, message string) {
 	p.mu.Lock()

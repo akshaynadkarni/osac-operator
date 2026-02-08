@@ -87,6 +87,11 @@ func (m *mockProvisioningProvider) Name() string {
 	return "mock"
 }
 
+func (m *mockProvisioningProvider) ShouldProceedWithDeprovision(ctx context.Context, resource client.Object, provisionJob *provisioning.ProvisionStatus) (bool, *provisioning.ProvisionStatus, error) {
+	// Mock implementation - always proceed (like EDA)
+	return true, nil, nil
+}
+
 var _ = Describe("ComputeInstance Provisioning", func() {
 	var reconciler *ComputeInstanceReconciler
 	var instance *cloudkitv1alpha1.ComputeInstance

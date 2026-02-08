@@ -44,6 +44,13 @@ type ProvisioningProvider interface {
 	// Returns current status and whether the job is complete.
 	GetDeprovisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error)
 
+	// ShouldProceedWithDeprovision determines if deprovisioning should proceed.
+	// This allows providers to implement custom logic for handling in-progress provision jobs.
+	// For example, AAP Direct may need to poll and cancel running jobs, while EDA can proceed immediately.
+	// Returns shouldProceed=true if ready to start deprovisioning, false if need to wait/retry.
+	// Returns updated ProvisionStatus if the provision job status was checked.
+	ShouldProceedWithDeprovision(ctx context.Context, resource client.Object, provisionJob *ProvisionStatus) (shouldProceed bool, updatedStatus *ProvisionStatus, err error)
+
 	// Name returns the provider name for logging and identification.
 	Name() string
 }

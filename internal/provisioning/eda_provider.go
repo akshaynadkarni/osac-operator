@@ -127,3 +127,12 @@ func (p *EDAProvider) GetDeprovisionStatus(ctx context.Context, jobID string) (P
 func (p *EDAProvider) Name() string {
 	return "eda"
 }
+
+// ShouldProceedWithDeprovision determines if deprovisioning should proceed for EDA.
+// EDA is fire-and-forget and doesn't support job status polling, so always proceed.
+// The ComputeInstance phase (Ready/Failed) indicates if provisioning completed.
+func (p *EDAProvider) ShouldProceedWithDeprovision(ctx context.Context, resource client.Object, provisionJob *ProvisionStatus) (shouldProceed bool, updatedStatus *ProvisionStatus, err error) {
+	// EDA provider: always proceed with deprovisioning
+	// Phase field is the source of truth for completion status
+	return true, nil, nil
+}

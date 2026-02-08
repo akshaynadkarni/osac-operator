@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/innabox/cloudkit-operator/internal/aap"
 )
@@ -172,6 +173,37 @@ func (p *AAPProvider) GetDeprovisionStatus(ctx context.Context, jobID string) (P
 // Name returns the provider name for logging.
 func (p *AAPProvider) Name() string {
 	return "aap"
+}
+
+// ShouldProceedWithDeprovision determines if deprovisioning should proceed for AAP Direct.
+// AAP Direct needs to check if any provision job is running and cancel it before deprovisioning.
+func (p *AAPProvider) ShouldProceedWithDeprovision(ctx context.Context, resource client.Object, provisionJob *ProvisionStatus) (shouldProceed bool, updatedStatus *ProvisionStatus, err error) {
+	log := ctrllog.FromContext(ctx)
+
+	// No provision job - unexpected for AAP Direct but safe to proceed
+	if provisionJob == nil || provisionJob.JobID == "" {
+		log.Info("AAP Direct: no provision job found during deprovision (unexpected but safe to proceed)")
+		return true, nil, nil
+	}
+
+	// Poll current job status from AAP (don't trust cached status during deletion)
+	status, err := p.GetProvisionStatus(ctx, provisionJob.JobID)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to get provision job status: %w", err)
+	}
+
+	// Provision job already in terminal state, safe to proceed
+	if status.State.IsTerminal() {
+		return true, &status, nil
+	}
+
+	// Provision job is still running - cancel it
+	if err := p.CancelProvision(ctx, provisionJob.JobID); err != nil {
+		return false, nil, fmt.Errorf("failed to cancel provision job: %w", err)
+	}
+
+	// Cancellation initiated - need to requeue and wait for terminal state
+	return false, &status, nil
 }
 
 // getJobStatus retrieves job status from AAP and converts it to ProvisionStatus.
