@@ -355,4 +355,87 @@ var _ = Describe("Client", func() {
 			Expect(requestCount).To(Equal(initialCount * 2))
 		})
 	})
+
+	Describe("CanCancelJob", func() {
+		Context("when job can be canceled", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"can_cancel": true,
+					})
+				}))
+				client = aap.NewClient(server.URL, "test-token")
+			})
+
+			It("should return true", func() {
+				canCancel, err := client.CanCancelJob(ctx, "123")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(canCancel).To(BeTrue())
+			})
+		})
+
+		Context("when job cannot be canceled", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"can_cancel": false,
+					})
+				}))
+				client = aap.NewClient(server.URL, "test-token")
+			})
+
+			It("should return false", func() {
+				canCancel, err := client.CanCancelJob(ctx, "456")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(canCancel).To(BeFalse())
+			})
+		})
+
+		Context("when request fails", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				client = aap.NewClient(server.URL, "test-token")
+			})
+
+			It("should return error", func() {
+				_, err := client.CanCancelJob(ctx, "999")
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("CancelJob", func() {
+		Context("when cancellation succeeds", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusAccepted)
+					_ = json.NewEncoder(w).Encode(map[string]any{})
+				}))
+				client = aap.NewClient(server.URL, "test-token")
+			})
+
+			It("should return no error", func() {
+				err := client.CancelJob(ctx, "123")
+				Expect(err).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("when job cannot be canceled (method not allowed)", func() {
+			BeforeEach(func() {
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					_, _ = w.Write([]byte("job cannot be canceled"))
+				}))
+				client = aap.NewClient(server.URL, "test-token")
+			})
+
+			It("should return error", func() {
+				err := client.CancelJob(ctx, "456")
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("failed to cancel job"))
+			})
+		})
+	})
 })

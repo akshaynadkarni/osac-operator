@@ -355,4 +355,38 @@ var _ = Describe("AAPProvider", func() {
 			Expect(status.State).To(Equal(provisioning.JobStateSucceeded))
 		})
 	})
+
+	Describe("CancelProvision", func() {
+		Context("when cancellation succeeds", func() {
+			BeforeEach(func() {
+				aapClient.cancelJobFunc = func(ctx context.Context, jobID string) error {
+					return nil
+				}
+			})
+
+			It("should return no error", func() {
+				err := provider.CancelProvision(ctx, "123")
+				Expect(err).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("when job is already terminal (method not allowed)", func() {
+			BeforeEach(func() {
+				aapClient.cancelJobFunc = func(ctx context.Context, jobID string) error {
+					return fmt.Errorf("received non-success status code 405: Method not allowed")
+				}
+			})
+
+			It("should return no error (job already terminal)", func() {
+				err := provider.CancelProvision(ctx, "456")
+				Expect(err).NotTo(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("Name", func() {
+		It("should return provider name", func() {
+			Expect(provider.Name()).To(Equal(provisioning.ProviderTypeAAP))
+		})
+	})
 })
