@@ -3,6 +3,7 @@ package provisioning
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -189,6 +190,12 @@ func (p *AAPProvider) ShouldProceedWithDeprovision(ctx context.Context, resource
 	// Poll current job status from AAP (don't trust cached status during deletion)
 	status, err := p.GetProvisionStatus(ctx, provisionJob.JobID)
 	if err != nil {
+		// If job not found (404), treat as terminal - AAP may have purged old jobs
+		var notFoundErr *aap.NotFoundError
+		if errors.As(err, &notFoundErr) {
+			log.Info("AAP job not found, treating as terminal and proceeding with deprovision", "jobID", provisionJob.JobID)
+			return true, nil, nil
+		}
 		return false, nil, fmt.Errorf("failed to get provision job status: %w", err)
 	}
 

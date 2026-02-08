@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// NotFoundError indicates a resource was not found in AAP (HTTP 404).
+// This typically happens when querying for jobs that have been purged.
+type NotFoundError struct {
+	Resource string // e.g., "job 123", "template foo"
+	URL      string
+}
+
+func (e *NotFoundError) Error() string {
+	return fmt.Sprintf("resource not found: %s", e.Resource)
+}
+
 const (
 	// APIVersion is the AAP API version path
 	APIVersion = "v2"
@@ -296,6 +307,13 @@ func (c *Client) doRequest(ctx context.Context, method, url string, payload any)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Return typed error for 404 Not Found
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &NotFoundError{
+				Resource: url,
+				URL:      url,
+			}
+		}
 		return nil, fmt.Errorf("received non-success status code %d: %s", resp.StatusCode, string(respBody))
 	}
 

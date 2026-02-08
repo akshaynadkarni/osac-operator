@@ -3,6 +3,7 @@ package aap_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -73,12 +74,13 @@ var _ = Describe("Client", func() {
 				client = aap.NewClient(server.URL, "test-token")
 			})
 
-			It("should return error", func() {
+			It("should return NotFoundError", func() {
 				_, err := client.LaunchJobTemplate(ctx, aap.LaunchJobTemplateRequest{
 					TemplateName: "missing-template",
 				})
 				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("404"))
+				var notFoundErr *aap.NotFoundError
+				Expect(errors.As(err, &notFoundErr)).To(BeTrue())
 			})
 		})
 	})
