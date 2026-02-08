@@ -43,7 +43,7 @@ func NewClient(baseURL, token string) *Client {
 // LaunchJobTemplateRequest contains parameters for launching a job template.
 type LaunchJobTemplateRequest struct {
 	TemplateName string
-	ExtraVars    map[string]interface{}
+	ExtraVars    map[string]any
 }
 
 // LaunchJobTemplateResponse contains the response from launching a job template.
@@ -54,7 +54,7 @@ type LaunchJobTemplateResponse struct {
 // LaunchWorkflowTemplateRequest contains parameters for launching a workflow template.
 type LaunchWorkflowTemplateRequest struct {
 	TemplateName string
-	ExtraVars    map[string]interface{}
+	ExtraVars    map[string]any
 }
 
 // LaunchWorkflowTemplateResponse contains the response from launching a workflow template.
@@ -91,7 +91,7 @@ type Template struct {
 func (c *Client) LaunchJobTemplate(ctx context.Context, req LaunchJobTemplateRequest) (*LaunchJobTemplateResponse, error) {
 	url := fmt.Sprintf("%s/%s/job_templates/%s/launch/", c.baseURL, APIVersion, req.TemplateName)
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"extra_vars": req.ExtraVars,
 	}
 
@@ -112,7 +112,7 @@ func (c *Client) LaunchJobTemplate(ctx context.Context, req LaunchJobTemplateReq
 func (c *Client) LaunchWorkflowTemplate(ctx context.Context, req LaunchWorkflowTemplateRequest) (*LaunchWorkflowTemplateResponse, error) {
 	url := fmt.Sprintf("%s/%s/workflow_job_templates/%s/launch/", c.baseURL, APIVersion, req.TemplateName)
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"extra_vars": req.ExtraVars,
 	}
 
@@ -257,14 +257,14 @@ func (c *Client) InvalidateTemplateCache(templateName string) {
 
 // ClearTemplateCache removes all templates from the cache.
 func (c *Client) ClearTemplateCache() {
-	c.templateCache.Range(func(key, value interface{}) bool {
+	c.templateCache.Range(func(key, value any) bool {
 		c.templateCache.Delete(key)
 		return true
 	})
 }
 
 // doRequest performs an HTTP request with authentication and returns the response body.
-func (c *Client) doRequest(ctx context.Context, method, url string, payload interface{}) ([]byte, error) {
+func (c *Client) doRequest(ctx context.Context, method, url string, payload any) ([]byte, error) {
 	var body io.Reader
 	if payload != nil {
 		jsonData, err := json.Marshal(payload)

@@ -47,7 +47,7 @@ var _ = Describe("Client", func() {
 					Expect(r.Header.Get("Authorization")).To(ContainSubstring("Bearer test-token"))
 
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]any{
 						"id": 123,
 					})
 				}))
@@ -57,7 +57,7 @@ var _ = Describe("Client", func() {
 			It("should return job ID", func() {
 				resp, err := client.LaunchJobTemplate(ctx, aap.LaunchJobTemplateRequest{
 					TemplateName: "test-template",
-					ExtraVars:    map[string]interface{}{"key": "value"},
+					ExtraVars:    map[string]any{"key": "value"},
 				})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(resp.JobID).To(Equal(123))
@@ -91,7 +91,7 @@ var _ = Describe("Client", func() {
 					Expect(r.Method).To(Equal(http.MethodPost))
 
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]any{
 						"id": 456,
 					})
 				}))
@@ -101,7 +101,7 @@ var _ = Describe("Client", func() {
 			It("should return job ID", func() {
 				resp, err := client.LaunchWorkflowTemplate(ctx, aap.LaunchWorkflowTemplateRequest{
 					TemplateName: "test-workflow",
-					ExtraVars:    map[string]interface{}{"workflow_var": "value"},
+					ExtraVars:    map[string]any{"workflow_var": "value"},
 				})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(resp.JobID).To(Equal(456))
@@ -117,7 +117,7 @@ var _ = Describe("Client", func() {
 					Expect(r.Method).To(Equal(http.MethodGet))
 
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]any{
 						"id":               789,
 						"status":           "successful",
 						"started":          time.Now().UTC().Format(time.RFC3339),
@@ -158,15 +158,15 @@ var _ = Describe("Client", func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-job" {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						_ = json.NewEncoder(w).Encode(map[string]any{
 							"count": 1,
-							"results": []map[string]interface{}{
+							"results": []map[string]any{
 								{"id": 19, "name": "my-job"},
 							},
 						})
 					} else {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": 0, "results": []interface{}{}})
+						_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
 					}
 				}))
 				client = aap.NewClient(server.URL, "test-token")
@@ -186,15 +186,15 @@ var _ = Describe("Client", func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-workflow" {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						_ = json.NewEncoder(w).Encode(map[string]any{
 							"count": 1,
-							"results": []map[string]interface{}{
+							"results": []map[string]any{
 								{"id": 20, "name": "my-workflow"},
 							},
 						})
 					} else {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": 0, "results": []interface{}{}})
+						_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
 					}
 				}))
 				client = aap.NewClient(server.URL, "test-token")
@@ -213,7 +213,7 @@ var _ = Describe("Client", func() {
 			BeforeEach(func() {
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": 0, "results": []interface{}{}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
 				}))
 				client = aap.NewClient(server.URL, "test-token")
 			})
@@ -236,15 +236,15 @@ var _ = Describe("Client", func() {
 					requestCount++
 					if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "cached-job" {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						_ = json.NewEncoder(w).Encode(map[string]any{
 							"count": 1,
-							"results": []map[string]interface{}{
+							"results": []map[string]any{
 								{"id": 1, "name": "cached-job"},
 							},
 						})
 					} else {
 						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": 0, "results": []interface{}{}})
+						_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
 					}
 				}))
 				client = aap.NewClient(server.URL, "test-token")
@@ -275,15 +275,15 @@ var _ = Describe("Client", func() {
 				requestCount++
 				if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-job" {
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]any{
 						"count": 1,
-						"results": []map[string]interface{}{
+						"results": []map[string]any{
 							{"id": 1, "name": "my-job"},
 						},
 					})
 				} else {
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": 0, "results": []interface{}{}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
 				}
 			}))
 			client = aap.NewClient(server.URL, "test-token")
@@ -314,23 +314,23 @@ var _ = Describe("Client", func() {
 				requestCount++
 				if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "job1" {
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]any{
 						"count": 1,
-						"results": []map[string]interface{}{
+						"results": []map[string]any{
 							{"id": 1, "name": "job1"},
 						},
 					})
 				} else if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint) && r.URL.Query().Get("name") == "workflow1" {
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]any{
 						"count": 1,
-						"results": []map[string]interface{}{
+						"results": []map[string]any{
 							{"id": 2, "name": "workflow1"},
 						},
 					})
 				} else {
 					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": 0, "results": []interface{}{}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
 				}
 			}))
 			client = aap.NewClient(server.URL, "test-token")

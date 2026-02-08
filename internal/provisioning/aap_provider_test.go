@@ -70,9 +70,9 @@ func (m *mockAAPClient) CancelJob(ctx context.Context, jobID string) error {
 
 // extractEDAPayload extracts the payload from EDA event structure in extra_vars.
 // This helper function is used to verify the EDA compatibility wrapper.
-func extractEDAPayload(extraVars map[string]interface{}) map[string]interface{} {
-	edaEvent := extraVars["ansible_eda"].(map[string]interface{})
-	return edaEvent["event"].(map[string]interface{})["payload"].(map[string]interface{})
+func extractEDAPayload(extraVars map[string]any) map[string]any {
+	edaEvent := extraVars["ansible_eda"].(map[string]any)
+	return edaEvent["event"].(map[string]any)["payload"].(map[string]any)
 }
 
 var _ = Describe("AAPProvider", func() {

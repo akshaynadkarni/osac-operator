@@ -230,7 +230,7 @@ func mapAAPStatusToJobState(aapStatus string) JobState {
 //
 // Future improvement: When/if we migrate away from EDA-triggered templates, this wrapper can be
 // removed and parameters can be passed directly as flat key-value pairs.
-func extractExtraVars(resource client.Object) (map[string]interface{}, error) {
+func extractExtraVars(resource client.Object) (map[string]any, error) {
 	// Convert the resource to map using JSON marshaling (respects JSON tags)
 	resourceMap, err := serializeResource(resource)
 	if err != nil {
@@ -238,9 +238,9 @@ func extractExtraVars(resource client.Object) (map[string]interface{}, error) {
 	}
 
 	// Wrap the full resource in EDA event structure for compatibility with EDA-designed templates
-	return map[string]interface{}{
-		"ansible_eda": map[string]interface{}{
-			"event": map[string]interface{}{
+	return map[string]any{
+		"ansible_eda": map[string]any{
+			"event": map[string]any{
 				"payload": resourceMap,
 			},
 		},
@@ -249,15 +249,15 @@ func extractExtraVars(resource client.Object) (map[string]interface{}, error) {
 
 // serializeResource converts a Kubernetes resource to a map using JSON marshaling.
 // This respects the struct's JSON tags and provides the same structure as EDA events.
-func serializeResource(resource client.Object) (map[string]interface{}, error) {
+func serializeResource(resource client.Object) (map[string]any, error) {
 	// Marshal to JSON
 	jsonBytes, err := json.Marshal(resource)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal resource to JSON: %w", err)
 	}
 
-	// Unmarshal back to map[string]interface{}
-	var resourceMap map[string]interface{}
+	// Unmarshal back to map[string]any
+	var resourceMap map[string]any
 	if err := json.Unmarshal(jsonBytes, &resourceMap); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal JSON to map: %w", err)
 	}
