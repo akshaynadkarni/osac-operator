@@ -292,11 +292,15 @@ func mapAAPStatusToJobState(aapStatus string) JobState {
 		return JobStateFailed
 	case "canceled":
 		return JobStateCanceled
-	case "pending", "waiting", "running":
+	case "pending":
+		return JobStatePending
+	case "waiting":
+		return JobStateWaiting
+	case "running":
 		return JobStateRunning
 	default:
-		// Unknown states are treated as running to avoid premature termination
-		return JobStateRunning
+		// Unknown states should be marked as Unknown (non-terminal) to allow continued polling
+		return JobStateUnknown
 	}
 }
 

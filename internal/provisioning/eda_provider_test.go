@@ -127,11 +127,12 @@ var _ = Describe("EDAProvider", func() {
 	})
 
 	Describe("GetProvisionStatus", func() {
-		It("should always return running state", func() {
+		It("should always return unknown state", func() {
 			status, err := provider.GetProvisionStatus(ctx, resource, "job-123")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.JobID).To(Equal("job-123"))
-			Expect(status.State).To(Equal(provisioning.JobStateRunning))
+			Expect(status.State).To(Equal(provisioning.JobStateUnknown))
+			Expect(status.Message).To(Equal("EDA provider does not support status polling"))
 		})
 	})
 

@@ -76,12 +76,12 @@ func (p *EDAProvider) TriggerProvision(ctx context.Context, resource client.Obje
 }
 
 // GetProvisionStatus checks provisioning status.
-// EDA doesn't provide status polling, so this always returns JobStateRunning.
+// EDA doesn't provide status polling, so this always returns JobStateUnknown.
 // The reconciler must check the CR annotation for completion.
 func (p *EDAProvider) GetProvisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error) {
 	return ProvisionStatus{
 		JobID:   jobID,
-		State:   JobStateRunning,
+		State:   JobStateUnknown,
 		Message: "EDA provider does not support status polling",
 	}, nil
 }

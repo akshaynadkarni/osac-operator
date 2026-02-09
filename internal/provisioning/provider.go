@@ -121,6 +121,9 @@ const (
 	// JobStatePending indicates the job has been created but not yet started.
 	JobStatePending JobState = "Pending"
 
+	// JobStateWaiting indicates the job is waiting for resources or dependencies.
+	JobStateWaiting JobState = "Waiting"
+
 	// JobStateRunning indicates the job is currently executing.
 	JobStateRunning JobState = "Running"
 
@@ -132,6 +135,10 @@ const (
 
 	// JobStateCanceled indicates the job was canceled before completion.
 	JobStateCanceled JobState = "Canceled"
+
+	// JobStateUnknown indicates the job status is not recognized.
+	// This is a non-terminal state to allow continued polling.
+	JobStateUnknown JobState = "Unknown"
 )
 
 // IsTerminal returns true if the job state is in a terminal state (succeeded, failed, or canceled).

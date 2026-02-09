@@ -227,6 +227,48 @@ var _ = Describe("AAPProvider", func() {
 			})
 		})
 
+		Context("when job is pending", func() {
+			BeforeEach(func() {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
+					return &aap.Job{
+						ID:     id,
+						Status: "pending",
+					}, nil
+				}
+			})
+
+			It("should return pending state", func() {
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.State).To(Equal(provisioning.JobStatePending))
+			})
+		})
+
+		Context("when job is waiting", func() {
+			BeforeEach(func() {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
+					return &aap.Job{
+						ID:     id,
+						Status: "waiting",
+					}, nil
+				}
+			})
+
+			It("should return waiting state", func() {
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.State).To(Equal(provisioning.JobStateWaiting))
+			})
+		})
+
 		Context("when job is running", func() {
 			BeforeEach(func() {
 				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
@@ -271,6 +313,77 @@ var _ = Describe("AAPProvider", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status.State).To(Equal(provisioning.JobStateFailed))
 				Expect(status.ErrorDetails).To(Equal("Error: Connection timeout"))
+			})
+		})
+
+		Context("when job has error status", func() {
+			BeforeEach(func() {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
+					return &aap.Job{
+						ID:       id,
+						Status:   "error",
+						Started:  time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+						Finished: time.Date(2024, 1, 1, 12, 1, 0, 0, time.UTC),
+					}, nil
+				}
+			})
+
+			It("should return failed state", func() {
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.State).To(Equal(provisioning.JobStateFailed))
+				Expect(status.Message).To(Equal("error"))
+			})
+		})
+
+		Context("when job is canceled", func() {
+			BeforeEach(func() {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
+					return &aap.Job{
+						ID:       id,
+						Status:   "canceled",
+						Started:  time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+						Finished: time.Date(2024, 1, 1, 12, 3, 0, 0, time.UTC),
+					}, nil
+				}
+			})
+
+			It("should return canceled state", func() {
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.State).To(Equal(provisioning.JobStateCanceled))
+				Expect(status.Message).To(Equal("canceled"))
+			})
+		})
+
+		Context("when job has unknown status", func() {
+			BeforeEach(func() {
+				aapClient.getJobFunc = func(ctx context.Context, jobID string) (*aap.Job, error) {
+					var id int
+					if _, err := fmt.Sscanf(jobID, "%d", &id); err != nil {
+						id = 789 // default
+					}
+					return &aap.Job{
+						ID:      id,
+						Status:  "unknown_status",
+						Started: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+					}, nil
+				}
+			})
+
+			It("should return unknown state", func() {
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.State).To(Equal(provisioning.JobStateUnknown))
+				Expect(status.Message).To(Equal("unknown_status"))
 			})
 		})
 
