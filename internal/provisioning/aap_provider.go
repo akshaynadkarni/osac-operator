@@ -137,9 +137,16 @@ func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alp
 	log := ctrllog.FromContext(ctx)
 
 	// No provision job or job ID missing - ready to proceed
-	if instance.Status.ProvisionJob == nil || instance.Status.ProvisionJob.ID == "" {
+	if instance.Status.ProvisionJob == nil {
+		log.Info("no provision job found in status, ready to deprovision")
 		return true, nil
 	}
+	if instance.Status.ProvisionJob.ID == "" {
+		log.Info("provision job exists but ID is empty, ready to deprovision")
+		return true, nil
+	}
+
+	log.Info("checking provision job before deprovision", "jobID", instance.Status.ProvisionJob.ID, "currentState", instance.Status.ProvisionJob.State)
 
 	// Check provision job status
 	status, err := p.GetProvisionStatus(ctx, instance, instance.Status.ProvisionJob.ID)
@@ -152,18 +159,23 @@ func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alp
 		return false, fmt.Errorf("failed to get provision job status: %w", err)
 	}
 
+	log.Info("provision job status retrieved", "jobID", instance.Status.ProvisionJob.ID, "state", status.State, "isTerminal", status.State.IsTerminal())
+
 	// Job already terminal - ready to proceed
 	if status.State.IsTerminal() {
+		log.Info("provision job is terminal, ready to deprovision", "jobID", instance.Status.ProvisionJob.ID, "state", status.State)
 		return true, nil
 	}
 
 	// Job still running - cancel it
+	log.Info("provision job is running, attempting to cancel", "jobID", instance.Status.ProvisionJob.ID, "state", status.State)
 	if err := p.cancelProvisionJob(ctx, instance.Status.ProvisionJob.ID); err != nil {
 		var methodNotAllowedErr *aap.MethodNotAllowedError
 		if !errors.As(err, &methodNotAllowedErr) {
 			return false, fmt.Errorf("failed to cancel provision job: %w", err)
 		}
 		// 405 means already terminal, proceed
+		log.Info("job cancel returned 405 (already terminal), ready to deprovision", "jobID", instance.Status.ProvisionJob.ID)
 		return true, nil
 	}
 
