@@ -67,7 +67,8 @@ type ProvisioningProvider interface {
 	TriggerProvision(ctx context.Context, resource client.Object) (*ProvisionResult, error)
 
 	// GetProvisionStatus checks the status of a provisioning job.
-	GetProvisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error)
+	// The resource parameter allows providers to check additional state if needed.
+	GetProvisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error)
 
 	// TriggerDeprovision attempts to deprovision a resource.
 	// The provider performs any prerequisite checks and returns an action indicating
@@ -75,7 +76,9 @@ type ProvisioningProvider interface {
 	TriggerDeprovision(ctx context.Context, resource client.Object) (*DeprovisionResult, error)
 
 	// GetDeprovisionStatus checks the status of a deprovisioning job.
-	GetDeprovisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error)
+	// For providers that use external signals (like EDA checking finalizers),
+	// the resource parameter allows checking completion status.
+	GetDeprovisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error)
 
 	// Name returns the provider name for logging and identification.
 	Name() string

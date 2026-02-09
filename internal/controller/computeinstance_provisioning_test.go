@@ -34,9 +34,9 @@ import (
 type mockProvisioningProvider struct {
 	name                     string
 	triggerProvisionFunc     func(ctx context.Context, resource client.Object) (*provisioning.ProvisionResult, error)
-	getProvisionStatusFunc   func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error)
+	getProvisionStatusFunc   func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error)
 	triggerDeprovisionFunc   func(ctx context.Context, resource client.Object) (*provisioning.DeprovisionResult, error)
-	getDeprovisionStatusFunc func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error)
+	getDeprovisionStatusFunc func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error)
 }
 
 func (m *mockProvisioningProvider) TriggerProvision(ctx context.Context, resource client.Object) (*provisioning.ProvisionResult, error) {
@@ -50,9 +50,9 @@ func (m *mockProvisioningProvider) TriggerProvision(ctx context.Context, resourc
 	}, nil
 }
 
-func (m *mockProvisioningProvider) GetProvisionStatus(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+func (m *mockProvisioningProvider) GetProvisionStatus(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 	if m.getProvisionStatusFunc != nil {
-		return m.getProvisionStatusFunc(ctx, jobID)
+		return m.getProvisionStatusFunc(ctx, resource, jobID)
 	}
 	return provisioning.ProvisionStatus{
 		JobID:   jobID,
@@ -72,9 +72,9 @@ func (m *mockProvisioningProvider) TriggerDeprovision(ctx context.Context, resou
 	}, nil
 }
 
-func (m *mockProvisioningProvider) GetDeprovisionStatus(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+func (m *mockProvisioningProvider) GetDeprovisionStatus(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 	if m.getDeprovisionStatusFunc != nil {
-		return m.getDeprovisionStatusFunc(ctx, jobID)
+		return m.getDeprovisionStatusFunc(ctx, resource, jobID)
 	}
 	return provisioning.ProvisionStatus{
 		JobID:   jobID,
@@ -171,7 +171,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				ID: "existing-job-456",
 			}
 			provider := &mockProvisioningProvider{
-				getProvisionStatusFunc: func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+				getProvisionStatusFunc: func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 					Expect(jobID).To(Equal("existing-job-456"))
 					return provisioning.ProvisionStatus{
 						JobID:   jobID,
@@ -194,7 +194,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				ID: "successful-job-789",
 			}
 			provider := &mockProvisioningProvider{
-				getProvisionStatusFunc: func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+				getProvisionStatusFunc: func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 					return provisioning.ProvisionStatus{
 						JobID:             jobID,
 						State:             provisioning.JobStateSucceeded,
@@ -218,7 +218,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				ID: "failed-job-999",
 			}
 			provider := &mockProvisioningProvider{
-				getProvisionStatusFunc: func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+				getProvisionStatusFunc: func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 					return provisioning.ProvisionStatus{
 						JobID:        jobID,
 						State:        provisioning.JobStateFailed,
@@ -243,7 +243,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				ID: "error-job-111",
 			}
 			provider := &mockProvisioningProvider{
-				getProvisionStatusFunc: func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+				getProvisionStatusFunc: func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 					return provisioning.ProvisionStatus{}, errors.New("API unavailable")
 				},
 			}
@@ -343,7 +343,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				ID: "deprovision-running-456",
 			}
 			provider := &mockProvisioningProvider{
-				getDeprovisionStatusFunc: func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+				getDeprovisionStatusFunc: func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 					Expect(jobID).To(Equal("deprovision-running-456"))
 					return provisioning.ProvisionStatus{
 						JobID:   jobID,
@@ -368,7 +368,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				ID: "deprovision-error-222",
 			}
 			provider := &mockProvisioningProvider{
-				getDeprovisionStatusFunc: func(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+				getDeprovisionStatusFunc: func(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 					return provisioning.ProvisionStatus{}, errors.New("status check failed")
 				},
 			}

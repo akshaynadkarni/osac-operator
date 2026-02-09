@@ -78,7 +78,7 @@ func (p *EDAProvider) TriggerProvision(ctx context.Context, resource client.Obje
 // GetProvisionStatus checks provisioning status.
 // EDA doesn't provide status polling, so this always returns JobStateRunning.
 // The reconciler must check the CR annotation for completion.
-func (p *EDAProvider) GetProvisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error) {
+func (p *EDAProvider) GetProvisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error) {
 	return ProvisionStatus{
 		JobID:   jobID,
 		State:   JobStateRunning,
@@ -130,13 +130,23 @@ func (p *EDAProvider) TriggerDeprovision(ctx context.Context, resource client.Ob
 }
 
 // GetDeprovisionStatus checks deprovisioning status.
-// EDA doesn't provide status polling, so this always returns JobStateRunning.
-// The reconciler must check the CR for completion.
-func (p *EDAProvider) GetDeprovisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error) {
+// EDA signals completion by having the AAP playbook remove the AAP finalizer.
+// Returns Succeeded when finalizer is removed, Running while it still exists.
+func (p *EDAProvider) GetDeprovisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error) {
+	// Check if AAP finalizer has been removed (signals playbook completion)
+	if !controllerutil.ContainsFinalizer(resource, "cloudkit.openshift.io/computeinstance-aap") {
+		return ProvisionStatus{
+			JobID:   jobID,
+			State:   JobStateSucceeded,
+			Message: "AAP playbook completed (finalizer removed)",
+		}, nil
+	}
+
+	// Finalizer still present - playbook still running
 	return ProvisionStatus{
 		JobID:   jobID,
 		State:   JobStateRunning,
-		Message: "EDA provider does not support status polling",
+		Message: "Waiting for AAP playbook to complete",
 	}, nil
 }
 

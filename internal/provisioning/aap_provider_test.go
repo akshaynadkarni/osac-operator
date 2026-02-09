@@ -219,7 +219,7 @@ var _ = Describe("AAPProvider", func() {
 			})
 
 			It("should return succeeded state", func() {
-				status, err := provider.GetProvisionStatus(ctx, "789")
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status.JobID).To(Equal("789"))
 				Expect(status.State).To(Equal(provisioning.JobStateSucceeded))
@@ -243,7 +243,7 @@ var _ = Describe("AAPProvider", func() {
 			})
 
 			It("should return running state", func() {
-				status, err := provider.GetProvisionStatus(ctx, "789")
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status.State).To(Equal(provisioning.JobStateRunning))
 			})
@@ -267,7 +267,7 @@ var _ = Describe("AAPProvider", func() {
 			})
 
 			It("should return failed state with error details", func() {
-				status, err := provider.GetProvisionStatus(ctx, "789")
+				status, err := provider.GetProvisionStatus(ctx, resource, "789")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status.State).To(Equal(provisioning.JobStateFailed))
 				Expect(status.ErrorDetails).To(Equal("Error: Connection timeout"))
@@ -282,7 +282,7 @@ var _ = Describe("AAPProvider", func() {
 			})
 
 			It("should return error", func() {
-				_, err := provider.GetProvisionStatus(ctx, "invalid")
+				_, err := provider.GetProvisionStatus(ctx, resource, "invalid")
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("failed to get job"))
 			})
@@ -296,7 +296,7 @@ var _ = Describe("AAPProvider", func() {
 			})
 
 			It("should return error", func() {
-				_, err := provider.GetProvisionStatus(ctx, "789")
+				_, err := provider.GetProvisionStatus(ctx, resource, "789")
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("failed to get job"))
 			})
@@ -367,7 +367,7 @@ var _ = Describe("AAPProvider", func() {
 		})
 
 		It("should return job status", func() {
-			status, err := provider.GetDeprovisionStatus(ctx, "888")
+			status, err := provider.GetDeprovisionStatus(ctx, resource, "888")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.JobID).To(Equal("888"))
 			Expect(status.State).To(Equal(provisioning.JobStateSucceeded))

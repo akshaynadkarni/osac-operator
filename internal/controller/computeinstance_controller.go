@@ -275,7 +275,7 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 	}
 
 	// We have a job ID, check its status
-	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance.Status.ProvisionJob.ID)
+	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance, instance.Status.ProvisionJob.ID)
 	if err != nil {
 		log.Error(err, "failed to get provision job status", "jobID", instance.Status.ProvisionJob.ID)
 		instance.Status.ProvisionJob.Message = fmt.Sprintf("Failed to get job status: %v", err)
@@ -372,7 +372,7 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 	}
 
 	// We have a job ID, check its status
-	status, err := r.ProvisioningProvider.GetDeprovisionStatus(ctx, instance.Status.DeprovisionJob.ID)
+	status, err := r.ProvisioningProvider.GetDeprovisionStatus(ctx, instance, instance.Status.DeprovisionJob.ID)
 	if err != nil {
 		log.Error(err, "failed to get deprovision job status", "jobID", instance.Status.DeprovisionJob.ID)
 		instance.Status.DeprovisionJob.Message = fmt.Sprintf("Failed to get job status: %v", err)

@@ -128,7 +128,7 @@ var _ = Describe("EDAProvider", func() {
 
 	Describe("GetProvisionStatus", func() {
 		It("should always return running state", func() {
-			status, err := provider.GetProvisionStatus(ctx, "job-123")
+			status, err := provider.GetProvisionStatus(ctx, resource, "job-123")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.JobID).To(Equal("job-123"))
 			Expect(status.State).To(Equal(provisioning.JobStateRunning))
@@ -217,11 +217,32 @@ var _ = Describe("EDAProvider", func() {
 	})
 
 	Describe("GetDeprovisionStatus", func() {
-		It("should always return running state", func() {
-			status, err := provider.GetDeprovisionStatus(ctx, "job-456")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(status.JobID).To(Equal("job-456"))
-			Expect(status.State).To(Equal(provisioning.JobStateRunning))
+		Context("when AAP finalizer is present", func() {
+			BeforeEach(func() {
+				resource.Finalizers = []string{"cloudkit.openshift.io/computeinstance-aap"}
+			})
+
+			It("should return running state", func() {
+				status, err := provider.GetDeprovisionStatus(ctx, resource, "job-456")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.JobID).To(Equal("job-456"))
+				Expect(status.State).To(Equal(provisioning.JobStateRunning))
+				Expect(status.Message).To(Equal("Waiting for AAP playbook to complete"))
+			})
+		})
+
+		Context("when AAP finalizer has been removed", func() {
+			BeforeEach(func() {
+				resource.Finalizers = []string{}
+			})
+
+			It("should return succeeded state", func() {
+				status, err := provider.GetDeprovisionStatus(ctx, resource, "job-456")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status.JobID).To(Equal("job-456"))
+				Expect(status.State).To(Equal(provisioning.JobStateSucceeded))
+				Expect(status.Message).To(Equal("AAP playbook completed (finalizer removed)"))
+			})
 		})
 	})
 })

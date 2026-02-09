@@ -71,7 +71,7 @@ func (p *controllableProvider) TriggerProvision(ctx context.Context, resource cl
 	}, nil
 }
 
-func (p *controllableProvider) GetProvisionStatus(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+func (p *controllableProvider) GetProvisionStatus(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -116,7 +116,7 @@ func (p *controllableProvider) TriggerDeprovision(ctx context.Context, resource 
 	}, nil
 }
 
-func (p *controllableProvider) GetDeprovisionStatus(ctx context.Context, jobID string) (provisioning.ProvisionStatus, error) {
+func (p *controllableProvider) GetDeprovisionStatus(ctx context.Context, resource client.Object, jobID string) (provisioning.ProvisionStatus, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

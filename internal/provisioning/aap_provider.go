@@ -100,7 +100,7 @@ func (p *AAPProvider) launchProvisionJob(ctx context.Context, resource client.Ob
 }
 
 // GetProvisionStatus checks provisioning job status via AAP API.
-func (p *AAPProvider) GetProvisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error) {
+func (p *AAPProvider) GetProvisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error) {
 	return p.getJobStatus(ctx, jobID)
 }
 
@@ -142,7 +142,7 @@ func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alp
 	}
 
 	// Check provision job status
-	status, err := p.GetProvisionStatus(ctx, instance.Status.ProvisionJob.ID)
+	status, err := p.GetProvisionStatus(ctx, instance, instance.Status.ProvisionJob.ID)
 	if err != nil {
 		var notFoundErr *aap.NotFoundError
 		if errors.As(err, &notFoundErr) {
@@ -239,7 +239,7 @@ func (p *AAPProvider) launchDeprovisionJob(ctx context.Context, resource client.
 }
 
 // GetDeprovisionStatus checks deprovisioning job status via AAP API.
-func (p *AAPProvider) GetDeprovisionStatus(ctx context.Context, jobID string) (ProvisionStatus, error) {
+func (p *AAPProvider) GetDeprovisionStatus(ctx context.Context, resource client.Object, jobID string) (ProvisionStatus, error) {
 	return p.getJobStatus(ctx, jobID)
 }
 
