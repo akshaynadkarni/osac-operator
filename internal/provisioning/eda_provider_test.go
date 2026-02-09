@@ -72,10 +72,10 @@ var _ = Describe("EDAProvider", func() {
 				}
 			})
 
-			It("should return resource name as job ID", func() {
+			It("should return eda-webhook as job ID", func() {
 				result, err := provider.TriggerProvision(ctx, resource)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(result.JobID).To(Equal("test-resource"))
+				Expect(result.JobID).To(Equal("eda-webhook"))
 				Expect(result.InitialState).To(Equal(provisioning.JobStateRunning))
 				Expect(result.Message).To(Equal("Webhook sent to EDA, provisioning in progress"))
 			})
@@ -146,11 +146,11 @@ var _ = Describe("EDAProvider", func() {
 				}
 			})
 
-			It("should return resource name as job ID", func() {
+			It("should return eda-webhook as job ID", func() {
 				result, err := provider.TriggerDeprovision(ctx, resource)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result.Action).To(Equal(provisioning.DeprovisionTriggered))
-				Expect(result.JobID).To(Equal("test-resource"))
+				Expect(result.JobID).To(Equal("eda-webhook"))
 				Expect(result.BlockDeletionOnFailure).To(BeFalse())
 			})
 		})

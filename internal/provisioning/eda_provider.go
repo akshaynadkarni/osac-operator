@@ -67,9 +67,8 @@ func (p *EDAProvider) TriggerProvision(ctx context.Context, resource client.Obje
 		return nil, &RateLimitError{RetryAfter: remainingTime}
 	}
 
-	resourceName := resource.GetName()
 	return &ProvisionResult{
-		JobID:        resourceName,
+		JobID:        "eda-webhook",
 		InitialState: JobStateRunning,
 		Message:      "Webhook sent to EDA, provisioning in progress",
 	}, nil
@@ -121,10 +120,9 @@ func (p *EDAProvider) TriggerDeprovision(ctx context.Context, resource client.Ob
 		return nil, &RateLimitError{RetryAfter: remainingTime}
 	}
 
-	resourceName := resource.GetName()
 	return &DeprovisionResult{
 		Action:                 DeprovisionTriggered,
-		JobID:                  resourceName,
+		JobID:                  "eda-webhook",
 		BlockDeletionOnFailure: false,
 	}, nil
 }
