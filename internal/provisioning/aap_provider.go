@@ -131,6 +131,7 @@ func (p *AAPProvider) TriggerDeprovision(ctx context.Context, resource client.Ob
 		Action:                 DeprovisionTriggered,
 		JobID:                  jobID,
 		BlockDeletionOnFailure: true,
+		ProvisionJobState:      provisionState,
 	}, nil
 }
 

@@ -365,6 +365,11 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 
 		case provisioning.DeprovisionTriggered:
 			// Deprovision started successfully
+			// Update provision job state if provider returned one (job was terminal before deprovision)
+			if result.ProvisionJobState != "" && instance.Status.ProvisionJob != nil {
+				instance.Status.ProvisionJob.State = string(result.ProvisionJobState)
+				log.Info("updated provision job state before starting deprovision", "state", result.ProvisionJobState)
+			}
 			instance.Status.DeprovisionJob = &v1alpha1.JobStatus{
 				ID:                     result.JobID,
 				State:                  string(provisioning.JobStatePending),
