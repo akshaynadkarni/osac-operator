@@ -350,10 +350,11 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 		switch result.Action {
 		case provisioning.DeprovisionWaiting:
 			// Provider not ready yet (e.g., canceling provision job)
-			// Update provision job state if provider returned one (e.g., cancellation in progress)
-			if result.ProvisionJobState != "" && instance.Status.ProvisionJob != nil {
-				instance.Status.ProvisionJob.State = string(result.ProvisionJobState)
-				log.Info("updated provision job state while waiting for deprovision", "state", result.ProvisionJobState)
+			// Update provision job status if provider returned one (e.g., cancellation in progress)
+			if result.ProvisionJobStatus != nil && instance.Status.ProvisionJob != nil {
+				instance.Status.ProvisionJob.State = string(result.ProvisionJobStatus.State)
+				instance.Status.ProvisionJob.Message = result.ProvisionJobStatus.Message
+				log.Info("updated provision job status while waiting for deprovision", "state", result.ProvisionJobStatus.State, "message", result.ProvisionJobStatus.Message)
 			}
 			log.Info("deprovisioning not ready, requeueing")
 			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
@@ -365,10 +366,11 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 
 		case provisioning.DeprovisionTriggered:
 			// Deprovision started successfully
-			// Update provision job state if provider returned one (job was terminal before deprovision)
-			if result.ProvisionJobState != "" && instance.Status.ProvisionJob != nil {
-				instance.Status.ProvisionJob.State = string(result.ProvisionJobState)
-				log.Info("updated provision job state before starting deprovision", "state", result.ProvisionJobState)
+			// Update provision job status if provider returned one (job was terminal before deprovision)
+			if result.ProvisionJobStatus != nil && instance.Status.ProvisionJob != nil {
+				instance.Status.ProvisionJob.State = string(result.ProvisionJobStatus.State)
+				instance.Status.ProvisionJob.Message = result.ProvisionJobStatus.Message
+				log.Info("updated provision job status before starting deprovision", "state", result.ProvisionJobStatus.State, "message", result.ProvisionJobStatus.Message)
 			}
 			instance.Status.DeprovisionJob = &v1alpha1.JobStatus{
 				ID:                     result.JobID,

@@ -109,7 +109,7 @@ func (p *AAPProvider) TriggerDeprovision(ctx context.Context, resource client.Ob
 	instance := resource.(*v1alpha1.ComputeInstance)
 
 	// Check if provision job needs to be terminated first
-	ready, provisionState, err := p.isReadyForDeprovision(ctx, instance)
+	ready, provisionStatus, err := p.isReadyForDeprovision(ctx, instance)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +117,7 @@ func (p *AAPProvider) TriggerDeprovision(ctx context.Context, resource client.Ob
 		return &DeprovisionResult{
 			Action:                 DeprovisionWaiting,
 			BlockDeletionOnFailure: true,
-			ProvisionJobState:      provisionState,
+			ProvisionJobStatus:     provisionStatus,
 		}, nil
 	}
 
@@ -131,26 +131,26 @@ func (p *AAPProvider) TriggerDeprovision(ctx context.Context, resource client.Ob
 		Action:                 DeprovisionTriggered,
 		JobID:                  jobID,
 		BlockDeletionOnFailure: true,
-		ProvisionJobState:      provisionState,
+		ProvisionJobStatus:     provisionStatus,
 	}, nil
 }
 
 // isReadyForDeprovision checks if provision job is terminal before deprovisioning.
-// Returns (ready, currentProvisionState, error).
+// Returns (ready, currentProvisionStatus, error).
 // - ready: true if ready to deprovision, false if need to wait for provision job cancellation
-// - currentProvisionState: the actual provision job state from AAP (used to update CR status)
+// - currentProvisionStatus: the actual provision job status from AAP (used to update CR status)
 // - error: any error encountered during the check
-func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alpha1.ComputeInstance) (bool, JobState, error) {
+func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alpha1.ComputeInstance) (bool, *ProvisionStatus, error) {
 	log := ctrllog.FromContext(ctx)
 
 	// No provision job or job ID missing - ready to proceed
 	if instance.Status.ProvisionJob == nil {
 		log.Info("no provision job found in status, ready to deprovision")
-		return true, "", nil
+		return true, nil, nil
 	}
 	if instance.Status.ProvisionJob.ID == "" {
 		log.Info("provision job exists but ID is empty, ready to deprovision")
-		return true, "", nil
+		return true, nil, nil
 	}
 
 	log.Info("checking provision job before deprovision", "jobID", instance.Status.ProvisionJob.ID, "currentState", instance.Status.ProvisionJob.State)
@@ -161,9 +161,9 @@ func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alp
 		var notFoundErr *aap.NotFoundError
 		if errors.As(err, &notFoundErr) {
 			log.Info("AAP job not found (purged), treating as terminal", "jobID", instance.Status.ProvisionJob.ID)
-			return true, "", nil
+			return true, nil, nil
 		}
-		return false, "", fmt.Errorf("failed to get provision job status: %w", err)
+		return false, nil, fmt.Errorf("failed to get provision job status: %w", err)
 	}
 
 	log.Info("provision job status retrieved", "jobID", instance.Status.ProvisionJob.ID, "state", status.State, "isTerminal", status.State.IsTerminal())
@@ -171,7 +171,7 @@ func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alp
 	// Job already terminal - ready to proceed
 	if status.State.IsTerminal() {
 		log.Info("provision job is terminal, ready to deprovision", "jobID", instance.Status.ProvisionJob.ID, "state", status.State)
-		return true, status.State, nil
+		return true, &status, nil
 	}
 
 	// Job still running - cancel it
@@ -179,16 +179,16 @@ func (p *AAPProvider) isReadyForDeprovision(ctx context.Context, instance *v1alp
 	if err := p.cancelProvisionJob(ctx, instance.Status.ProvisionJob.ID); err != nil {
 		var methodNotAllowedErr *aap.MethodNotAllowedError
 		if !errors.As(err, &methodNotAllowedErr) {
-			return false, status.State, fmt.Errorf("failed to cancel provision job: %w", err)
+			return false, &status, fmt.Errorf("failed to cancel provision job: %w", err)
 		}
 		// 405 means already terminal, proceed
 		log.Info("job cancel returned 405 (already terminal), ready to deprovision", "jobID", instance.Status.ProvisionJob.ID)
-		return true, status.State, nil
+		return true, &status, nil
 	}
 
-	// Cancellation initiated - need to wait, return current state for CR update
+	// Cancellation initiated - need to wait, return current status for CR update
 	log.Info("provision job cancellation initiated, waiting for termination", "jobID", instance.Status.ProvisionJob.ID)
-	return false, status.State, nil
+	return false, &status, nil
 }
 
 // cancelProvisionJob attempts to cancel a running provision job via AAP API.

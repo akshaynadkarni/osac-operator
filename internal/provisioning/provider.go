@@ -57,10 +57,11 @@ type DeprovisionResult struct {
 	// Providers set based on their cleanup guarantees
 	BlockDeletionOnFailure bool
 
-	// ProvisionJobState is the current state of the provision job when Action==DeprovisionWaiting
-	// This allows the controller to update the CR status to reflect job cancellation
-	// Empty for other actions
-	ProvisionJobState JobState
+	// ProvisionJobStatus is the current status of the provision job (state and message)
+	// Populated when provision job is checked before deprovisioning
+	// This allows the controller to update the CR status to reflect job cancellation/termination
+	// Empty when no provision job exists
+	ProvisionJobStatus *ProvisionStatus
 }
 
 // ProvisioningProvider abstracts the mechanism for triggering infrastructure automation
