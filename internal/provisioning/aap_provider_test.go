@@ -489,7 +489,7 @@ var _ = Describe("AAPProvider", func() {
 
 	Describe("Name", func() {
 		It("should return provider name", func() {
-			Expect(provider.Name()).To(Equal(provisioning.ProviderTypeAAP))
+			Expect(provider.Name()).To(Equal(string(provisioning.ProviderTypeAAP)))
 		})
 	})
 })

@@ -81,7 +81,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 				controllerReconciler := &ComputeInstanceReconciler{
 					Client:               k8sClient,
 					Scheme:               k8sClient.Scheme(),
-					ProvisioningProvider: &mockProvisioningProvider{name: provisioning.ProviderTypeAAP},
+					ProvisioningProvider: &mockProvisioningProvider{name: string(provisioning.ProviderTypeAAP)},
 					StatusPollInterval:   100 * time.Millisecond,
 				}
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -95,7 +95,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 			controllerReconciler := &ComputeInstanceReconciler{
 				Client:               k8sClient,
 				Scheme:               k8sClient.Scheme(),
-				ProvisioningProvider: &mockProvisioningProvider{name: provisioning.ProviderTypeAAP},
+				ProvisioningProvider: &mockProvisioningProvider{name: string(provisioning.ProviderTypeAAP)},
 				StatusPollInterval:   100 * time.Millisecond,
 			}
 

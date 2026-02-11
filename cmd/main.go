@@ -63,15 +63,11 @@ var (
 
 const (
 	// EDA webhook environment variables
-	envComputeInstanceCreateWebhook = "CLOUDKIT_COMPUTE_INSTANCE_CREATE_WEBHOOK"
-	envComputeInstanceDeleteWebhook = "CLOUDKIT_COMPUTE_INSTANCE_DELETE_WEBHOOK"
+	envComputeInstanceProvisionWebhook   = "CLOUDKIT_COMPUTE_INSTANCE_PROVISION_WEBHOOK"
+	envComputeInstanceDeprovisionWebhook = "CLOUDKIT_COMPUTE_INSTANCE_DEPROVISION_WEBHOOK"
 
 	// Provider selection
 	envProvisioningProvider = "CLOUDKIT_PROVISIONING_PROVIDER"
-
-	// Provider type values
-	providerTypeEDA = "eda"
-	providerTypeAAP = "aap"
 
 	// AAP configuration
 	envAAPURL                 = "CLOUDKIT_AAP_URL"
@@ -79,10 +75,24 @@ const (
 	envAAPProvisionTemplate   = "CLOUDKIT_AAP_PROVISION_TEMPLATE"
 	envAAPDeprovisionTemplate = "CLOUDKIT_AAP_DEPROVISION_TEMPLATE"
 	envAAPStatusPollInterval  = "CLOUDKIT_AAP_STATUS_POLL_INTERVAL"
-
-	// Default status poll interval for provisioning providers
-	defaultStatusPollInterval = 30 * time.Second
 )
+
+// parsePollInterval parses a poll interval from environment variable with fallback to default.
+func parsePollInterval(envVar string, defaultInterval time.Duration) time.Duration {
+	pollIntervalStr := os.Getenv(envVar)
+	if pollIntervalStr == "" {
+		return defaultInterval
+	}
+
+	interval, err := time.ParseDuration(pollIntervalStr)
+	if err != nil {
+		setupLog.Error(err, "invalid poll interval, using default",
+			"envVar", envVar, "value", pollIntervalStr, "default", defaultInterval)
+		return defaultInterval
+	}
+
+	return interval
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -95,42 +105,48 @@ func init() {
 
 // createEDAProvider creates and validates EDA webhook provider configuration.
 func createEDAProvider(
-	createWebhook, deleteWebhook string,
+	provisionWebhook, deprovisionWebhook string,
 	minimumRequestInterval time.Duration,
 ) (provisioning.ProvisioningProvider, time.Duration, error) {
-	if createWebhook == "" || deleteWebhook == "" {
-		return nil, 0, fmt.Errorf("EDA provider requires both %s and %s",
-			envComputeInstanceCreateWebhook, envComputeInstanceDeleteWebhook)
+	webhookClient := controller.NewWebhookClient(10*time.Second, minimumRequestInterval)
+	config := provisioning.ProviderConfig{
+		ProviderType:       provisioning.ProviderTypeEDA,
+		WebhookClient:      webhookClient,
+		ProvisionWebhook:   provisionWebhook,
+		DeprovisionWebhook: deprovisionWebhook,
 	}
 
-	webhookClient := controller.NewWebhookClient(10*time.Second, minimumRequestInterval)
-	provider := provisioning.NewEDAProvider(webhookClient, createWebhook, deleteWebhook)
-	setupLog.Info("using EDA webhook provider for ComputeInstance", "createURL", createWebhook, "deleteURL", deleteWebhook)
+	provider, err := provisioning.NewProvider(config)
+	if err != nil {
+		return nil, 0, err
+	}
 
-	return provider, defaultStatusPollInterval, nil
+	setupLog.Info("using EDA webhook provider for ComputeInstance",
+		"provisionURL", provisionWebhook,
+		"deprovisionURL", deprovisionWebhook)
+
+	return provider, provisioning.DefaultStatusPollInterval, nil
 }
 
 // createAAPProvider creates and validates AAP direct provider configuration.
 func createAAPProvider(
 	aapURL, aapToken, provisionTemplate, deprovisionTemplate string,
 ) (provisioning.ProvisioningProvider, time.Duration, error) {
-	if aapURL == "" || aapToken == "" {
-		return nil, 0, fmt.Errorf("AAP provider requires both %s and %s", envAAPURL, envAAPToken)
-	}
-
-	// Parse status poll interval with default
-	statusPollInterval := defaultStatusPollInterval
-	if pollIntervalStr := os.Getenv(envAAPStatusPollInterval); pollIntervalStr != "" {
-		if interval, err := time.ParseDuration(pollIntervalStr); err == nil {
-			statusPollInterval = interval
-		} else {
-			setupLog.Error(err, "invalid AAP status poll interval, using default",
-				"interval", pollIntervalStr, "default", statusPollInterval)
-		}
-	}
+	statusPollInterval := parsePollInterval(envAAPStatusPollInterval, provisioning.DefaultStatusPollInterval)
 
 	aapClient := aap.NewClient(aapURL, aapToken)
-	provider := provisioning.NewAAPProvider(aapClient, provisionTemplate, deprovisionTemplate)
+	config := provisioning.ProviderConfig{
+		ProviderType:        provisioning.ProviderTypeAAP,
+		AAPClient:           aapClient,
+		ProvisionTemplate:   provisionTemplate,
+		DeprovisionTemplate: deprovisionTemplate,
+	}
+
+	provider, err := provisioning.NewProvider(config)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	setupLog.Info("using AAP direct provider for ComputeInstance",
 		"url", aapURL,
 		"provisionTemplate", provisionTemplate,
@@ -138,6 +154,25 @@ func createAAPProvider(
 		"statusPollInterval", statusPollInterval)
 
 	return provider, statusPollInterval, nil
+}
+
+// createProvider creates a provisioning provider based on type.
+func createProvider(
+	providerType provisioning.ProviderType,
+	provisionWebhook, deprovisionWebhook string,
+	aapURL, aapToken, provisionTemplate, deprovisionTemplate string,
+	minimumRequestInterval time.Duration,
+) (provisioning.ProvisioningProvider, time.Duration, error) {
+	switch providerType {
+	case provisioning.ProviderTypeEDA:
+		return createEDAProvider(provisionWebhook, deprovisionWebhook, minimumRequestInterval)
+
+	case provisioning.ProviderTypeAAP:
+		return createAAPProvider(aapURL, aapToken, provisionTemplate, deprovisionTemplate)
+
+	default:
+		return nil, 0, fmt.Errorf("unknown provider type: %s", providerType)
+	}
 }
 
 func main() {
@@ -349,44 +384,29 @@ func main() {
 	}
 
 	// Create the ComputeInstance reconciler with appropriate provider
-	var computeInstanceProvider provisioning.ProvisioningProvider
-	var statusPollInterval time.Duration
-
 	// Read all configuration upfront
-	providerType := os.Getenv(envProvisioningProvider)
-	createWebhook := os.Getenv(envComputeInstanceCreateWebhook)
-	deleteWebhook := os.Getenv(envComputeInstanceDeleteWebhook)
+	providerTypeStr := os.Getenv(envProvisioningProvider)
+	provisionWebhook := os.Getenv(envComputeInstanceProvisionWebhook)
+	deprovisionWebhook := os.Getenv(envComputeInstanceDeprovisionWebhook)
 	aapURL := os.Getenv(envAAPURL)
 	aapToken := os.Getenv(envAAPToken)
 	provisionTemplate := os.Getenv(envAAPProvisionTemplate)
 	deprovisionTemplate := os.Getenv(envAAPDeprovisionTemplate)
 
 	// Default to EDA if not specified (backward compatibility)
+	providerType := provisioning.ProviderType(providerTypeStr)
 	if providerType == "" {
-		providerType = providerTypeEDA
+		providerType = provisioning.ProviderTypeEDA
 	}
 
-	switch providerType {
-	case providerTypeEDA:
-		var err error
-		computeInstanceProvider, statusPollInterval, err = createEDAProvider(
-			createWebhook, deleteWebhook, minimumRequestInterval)
-		if err != nil {
-			setupLog.Error(err, "failed to create EDA provider")
-			os.Exit(1)
-		}
-
-	case providerTypeAAP:
-		var err error
-		computeInstanceProvider, statusPollInterval, err = createAAPProvider(
-			aapURL, aapToken, provisionTemplate, deprovisionTemplate)
-		if err != nil {
-			setupLog.Error(err, "failed to create AAP provider")
-			os.Exit(1)
-		}
-
-	default:
-		setupLog.Error(fmt.Errorf("unknown provider type: %s", providerType), "invalid provider configuration")
+	computeInstanceProvider, statusPollInterval, err := createProvider(
+		providerType,
+		provisionWebhook, deprovisionWebhook,
+		aapURL, aapToken, provisionTemplate, deprovisionTemplate,
+		minimumRequestInterval,
+	)
+	if err != nil {
+		setupLog.Error(err, "failed to create provisioning provider")
 		os.Exit(1)
 	}
 

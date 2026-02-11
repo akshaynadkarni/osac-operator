@@ -385,7 +385,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				cloudkitComputeInstanceManagementStateAnnotation: ManagementStateManual,
 			}
 			provider := &mockProvisioningProvider{
-				name: provisioning.ProviderTypeAAP,
+				name: string(provisioning.ProviderTypeAAP),
 			}
 			reconciler.ProvisioningProvider = provider
 

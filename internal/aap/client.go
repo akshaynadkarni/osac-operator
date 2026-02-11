@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,7 +118,7 @@ func (c *Client) LaunchJobTemplate(ctx context.Context, req LaunchJobTemplateReq
 		"extra_vars": req.ExtraVars,
 	}
 
-	resp, err := c.doRequest(ctx, http.MethodPost, url, payload)
+	resp, err := c.doTemplateRequest(ctx, http.MethodPost, url, payload, req.TemplateName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to launch job template: %w", err)
 	}
@@ -138,7 +139,7 @@ func (c *Client) LaunchWorkflowTemplate(ctx context.Context, req LaunchWorkflowT
 		"extra_vars": req.ExtraVars,
 	}
 
-	resp, err := c.doRequest(ctx, http.MethodPost, url, payload)
+	resp, err := c.doTemplateRequest(ctx, http.MethodPost, url, payload, req.TemplateName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to launch workflow template: %w", err)
 	}
@@ -272,8 +273,9 @@ func (c *Client) GetTemplate(ctx context.Context, templateName string) (*Templat
 	return template, nil
 }
 
-// InvalidateTemplateCache removes a template from the cache.
-func (c *Client) InvalidateTemplateCache(templateName string) {
+// invalidateTemplateCache removes a template from the cache.
+// Called internally when template lookups fail to ensure fresh lookups on retry.
+func (c *Client) invalidateTemplateCache(templateName string) {
 	c.templateCache.Delete(templateName)
 }
 
@@ -283,6 +285,21 @@ func (c *Client) ClearTemplateCache() {
 		c.templateCache.Delete(key)
 		return true
 	})
+}
+
+// doTemplateRequest performs an HTTP request for template operations with cache invalidation on 404.
+// If the template is not found (404), it invalidates the cache to ensure fresh lookup on retry.
+func (c *Client) doTemplateRequest(ctx context.Context, method, url string, payload any, templateName string) ([]byte, error) {
+	resp, err := c.doRequest(ctx, method, url, payload)
+	if err != nil {
+		// If template not found (404), invalidate cache to ensure fresh lookup on retry
+		var notFoundErr *NotFoundError
+		if errors.As(err, &notFoundErr) {
+			c.invalidateTemplateCache(templateName)
+		}
+		return nil, err
+	}
+	return resp, nil
 }
 
 // doRequest performs an HTTP request with authentication and returns the response body.

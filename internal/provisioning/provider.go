@@ -8,12 +8,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// ProviderType represents the type of provisioning provider.
+type ProviderType string
+
 const (
 	// ProviderTypeEDA identifies the EDA webhook-based provider
-	ProviderTypeEDA = "eda"
+	ProviderTypeEDA ProviderType = "eda"
 
 	// ProviderTypeAAP identifies the AAP REST API direct provider
-	ProviderTypeAAP = "aap"
+	ProviderTypeAAP ProviderType = "aap"
 )
 
 // ProvisionResult contains the result of triggering a provision operation.

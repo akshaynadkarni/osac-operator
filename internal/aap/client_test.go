@@ -268,21 +268,35 @@ var _ = Describe("Client", func() {
 		})
 	})
 
-	Describe("InvalidateTemplateCache", func() {
+	Describe("Template cache invalidation on 404", func() {
 		var requestCount int
+		const templateName = "deleted-template"
 
 		BeforeEach(func() {
 			requestCount = 0
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestCount++
-				if r.URL.Path == fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint) && r.URL.Query().Get("name") == "my-job" {
+
+				templateQueryPath := fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint)
+				isTemplateQuery := r.URL.Path == templateQueryPath && r.URL.Query().Get("name") == templateName
+
+				launchPath := fmt.Sprintf("/%s/%s/%s/launch/", aap.APIVersion, aap.JobTemplatesEndpoint, templateName)
+				isLaunchRequest := r.URL.Path == launchPath && r.Method == http.MethodPost
+
+				if isTemplateQuery {
+					// First call: template exists
+					// Second call (after 404): template exists again (simulating re-query)
 					w.WriteHeader(http.StatusOK)
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"count": 1,
 						"results": []map[string]any{
-							{"id": 1, "name": "my-job"},
+							{"id": 99, "name": templateName},
 						},
 					})
+				} else if isLaunchRequest {
+					// Launch returns 404 - template was deleted in AAP
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte("template not found"))
 				} else {
 					w.WriteHeader(http.StatusOK)
 					_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
@@ -291,19 +305,91 @@ var _ = Describe("Client", func() {
 			client = aap.NewClient(server.URL, "test-token")
 		})
 
-		It("should remove template from cache", func() {
-			// Populate cache
-			_, err := client.GetTemplate(ctx, "my-job")
+		It("should invalidate cache when LaunchJobTemplate returns 404", func() {
+			// Step 1: GetTemplate caches the template
+			template, err := client.GetTemplate(ctx, templateName)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(requestCount).To(Equal(1))
+			Expect(template.ID).To(Equal(99))
+			Expect(requestCount).To(Equal(1)) // 1 request to get template
 
-			// Invalidate cache
-			client.InvalidateTemplateCache("my-job")
+			// Step 2: LaunchJobTemplate returns 404 (template deleted in AAP)
+			// This should trigger cache invalidation
+			_, err = client.LaunchJobTemplate(ctx, aap.LaunchJobTemplateRequest{
+				TemplateName: templateName,
+			})
+			Expect(err).To(HaveOccurred())
+			var notFoundErr *aap.NotFoundError
+			Expect(errors.As(err, &notFoundErr)).To(BeTrue())
+			Expect(requestCount).To(Equal(2)) // 2 requests: initial get + failed launch
 
-			// Should query AAP again
-			_, err = client.GetTemplate(ctx, "my-job")
+			// Step 3: Next GetTemplate should query AAP again (not from cache)
+			template, err = client.GetTemplate(ctx, templateName)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(requestCount).To(Equal(2))
+			Expect(template.ID).To(Equal(99))
+			Expect(requestCount).To(Equal(3)) // 3 requests: get + launch + get (cache invalidated)
+		})
+
+		It("should invalidate cache when LaunchWorkflowTemplate returns 404", func() {
+			const workflowName = "deleted-workflow"
+
+			// Reset server for workflow template test
+			server.Close()
+			requestCount = 0
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+
+				workflowQueryPath := fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint)
+				isWorkflowQuery := r.URL.Path == workflowQueryPath && r.URL.Query().Get("name") == workflowName
+
+				workflowLaunchPath := fmt.Sprintf("/%s/%s/%s/launch/", aap.APIVersion, aap.WorkflowJobTemplatesEndpoint, workflowName)
+				isWorkflowLaunchRequest := r.URL.Path == workflowLaunchPath && r.Method == http.MethodPost
+
+				jobQueryPath := fmt.Sprintf("/%s/%s/", aap.APIVersion, aap.JobTemplatesEndpoint)
+				isJobQuery := r.URL.Path == jobQueryPath && r.URL.Query().Get("name") == workflowName
+
+				if isWorkflowQuery {
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"count": 1,
+						"results": []map[string]any{
+							{"id": 88, "name": workflowName},
+						},
+					})
+				} else if isWorkflowLaunchRequest {
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte("workflow template not found"))
+				} else if isJobQuery {
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
+				} else {
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}})
+				}
+			}))
+			client = aap.NewClient(server.URL, "test-token")
+
+			// Step 1: GetTemplate caches the workflow template
+			template, err := client.GetTemplate(ctx, workflowName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(template.ID).To(Equal(88))
+			Expect(template.Type).To(Equal(aap.TemplateTypeWorkflow))
+			Expect(requestCount).To(Equal(2)) // 2 requests: job_templates + workflow_job_templates
+
+			// Step 2: LaunchWorkflowTemplate returns 404 (template deleted in AAP)
+			// This should trigger cache invalidation
+			_, err = client.LaunchWorkflowTemplate(ctx, aap.LaunchWorkflowTemplateRequest{
+				TemplateName: workflowName,
+			})
+			Expect(err).To(HaveOccurred())
+			var notFoundErr *aap.NotFoundError
+			Expect(errors.As(err, &notFoundErr)).To(BeTrue())
+			Expect(requestCount).To(Equal(3)) // 3 requests: 2 initial gets + failed launch
+
+			// Step 3: Next GetTemplate should query AAP again (not from cache)
+			template, err = client.GetTemplate(ctx, workflowName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(template.ID).To(Equal(88))
+			Expect(requestCount).To(Equal(5)) // 5 requests: 2 initial + launch + 2 re-query (cache invalidated)
 		})
 	})
 
