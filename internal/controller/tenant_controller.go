@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	ovnv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,7 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	"github.com/osac-project/osac-operator/api/v1alpha1"
 )
@@ -59,7 +61,7 @@ func NewTenantReconciler(client client.Client, scheme *runtime.Scheme, tenantNam
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *TenantReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
 	instance := &v1alpha1.Tenant{}
@@ -91,7 +93,7 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 // handleUpdate handles creation and update operations for Tenant
-func (r *TenantReconciler) handleUpdate(ctx context.Context, req ctrl.Request, instance *v1alpha1.Tenant) (ctrl.Result, error) {
+func (r *TenantReconciler) handleUpdate(ctx context.Context, req reconcile.Request, instance *v1alpha1.Tenant) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
 	log.Info("handling update for Tenant", "name", instance.GetName(), "tenant", instance.Spec.Name)
@@ -127,7 +129,7 @@ func (r *TenantReconciler) handleUpdate(ctx context.Context, req ctrl.Request, i
 }
 
 // handleDelete handles deletion operations for Tenant
-func (r *TenantReconciler) handleDelete(ctx context.Context, req ctrl.Request, instance *v1alpha1.Tenant) (ctrl.Result, error) {
+func (r *TenantReconciler) handleDelete(ctx context.Context, req reconcile.Request, instance *v1alpha1.Tenant) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 	log.Info("handling delete for Tenant", "name", instance.Name)
 
@@ -189,14 +191,19 @@ func (r *TenantReconciler) mapObjectToTenant(ctx context.Context, obj client.Obj
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *TenantReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	// Predicate to filter resources with tenant label
 	tenantLabelPredicate, err := predicate.LabelSelectorPredicate(tenantLabelSelector(r.tenantNamespace))
 	if err != nil {
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	localMgr := mgr.GetLocalManager()
+	if localMgr == nil {
+		return fmt.Errorf("local manager is nil")
+	}
+
+	return ctrl.NewControllerManagedBy(localMgr).
 		For(&v1alpha1.Tenant{}, builder.WithPredicates(tenantNamespacePredicate(r.tenantNamespace))).
 		Named("tenant").
 		Watches(
