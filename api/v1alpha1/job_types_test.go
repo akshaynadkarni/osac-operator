@@ -11,65 +11,31 @@ import (
 )
 
 var _ = Describe("JobState", func() {
-	Describe("IsTerminal", func() {
-		It("should return false for pending state", func() {
-			Expect(v1alpha1.JobStatePending.IsTerminal()).To(BeFalse())
-		})
+	DescribeTable("IsTerminal",
+		func(state v1alpha1.JobState, expected bool) {
+			Expect(state.IsTerminal()).To(Equal(expected))
+		},
+		Entry("pending is not terminal", v1alpha1.JobStatePending, false),
+		Entry("waiting is not terminal", v1alpha1.JobStateWaiting, false),
+		Entry("running is not terminal", v1alpha1.JobStateRunning, false),
+		Entry("unknown is not terminal", v1alpha1.JobStateUnknown, false),
+		Entry("succeeded is terminal", v1alpha1.JobStateSucceeded, true),
+		Entry("failed is terminal", v1alpha1.JobStateFailed, true),
+		Entry("canceled is terminal", v1alpha1.JobStateCanceled, true),
+	)
 
-		It("should return false for waiting state", func() {
-			Expect(v1alpha1.JobStateWaiting.IsTerminal()).To(BeFalse())
-		})
-
-		It("should return false for running state", func() {
-			Expect(v1alpha1.JobStateRunning.IsTerminal()).To(BeFalse())
-		})
-
-		It("should return false for unknown state", func() {
-			Expect(v1alpha1.JobStateUnknown.IsTerminal()).To(BeFalse())
-		})
-
-		It("should return true for succeeded state", func() {
-			Expect(v1alpha1.JobStateSucceeded.IsTerminal()).To(BeTrue())
-		})
-
-		It("should return true for failed state", func() {
-			Expect(v1alpha1.JobStateFailed.IsTerminal()).To(BeTrue())
-		})
-
-		It("should return true for canceled state", func() {
-			Expect(v1alpha1.JobStateCanceled.IsTerminal()).To(BeTrue())
-		})
-	})
-
-	Describe("IsSuccessful", func() {
-		It("should return false for pending state", func() {
-			Expect(v1alpha1.JobStatePending.IsSuccessful()).To(BeFalse())
-		})
-
-		It("should return false for waiting state", func() {
-			Expect(v1alpha1.JobStateWaiting.IsSuccessful()).To(BeFalse())
-		})
-
-		It("should return false for running state", func() {
-			Expect(v1alpha1.JobStateRunning.IsSuccessful()).To(BeFalse())
-		})
-
-		It("should return false for unknown state", func() {
-			Expect(v1alpha1.JobStateUnknown.IsSuccessful()).To(BeFalse())
-		})
-
-		It("should return true for succeeded state", func() {
-			Expect(v1alpha1.JobStateSucceeded.IsSuccessful()).To(BeTrue())
-		})
-
-		It("should return false for failed state", func() {
-			Expect(v1alpha1.JobStateFailed.IsSuccessful()).To(BeFalse())
-		})
-
-		It("should return false for canceled state", func() {
-			Expect(v1alpha1.JobStateCanceled.IsSuccessful()).To(BeFalse())
-		})
-	})
+	DescribeTable("IsSuccessful",
+		func(state v1alpha1.JobState, expected bool) {
+			Expect(state.IsSuccessful()).To(Equal(expected))
+		},
+		Entry("pending is not successful", v1alpha1.JobStatePending, false),
+		Entry("waiting is not successful", v1alpha1.JobStateWaiting, false),
+		Entry("running is not successful", v1alpha1.JobStateRunning, false),
+		Entry("unknown is not successful", v1alpha1.JobStateUnknown, false),
+		Entry("succeeded is successful", v1alpha1.JobStateSucceeded, true),
+		Entry("failed is not successful", v1alpha1.JobStateFailed, false),
+		Entry("canceled is not successful", v1alpha1.JobStateCanceled, false),
+	)
 })
 
 var _ = Describe("FindLatestJobByType", func() {
