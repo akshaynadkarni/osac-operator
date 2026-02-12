@@ -44,6 +44,11 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
+const (
+	// DefaultMaxJobHistory is the default number of jobs to keep in status.jobs array
+	DefaultMaxJobHistory = 10
+)
+
 // ComputeInstanceReconciler reconciles a ComputeInstance object
 type ComputeInstanceReconciler struct {
 	client.Client
@@ -52,6 +57,8 @@ type ComputeInstanceReconciler struct {
 	ProvisioningProvider     provisioning.ProvisioningProvider
 	// StatusPollInterval defines how often to check provisioning job status
 	StatusPollInterval time.Duration
+	// MaxJobHistory defines how many jobs to keep in status.jobs array
+	MaxJobHistory int
 }
 
 func NewComputeInstanceReconciler(
@@ -60,6 +67,7 @@ func NewComputeInstanceReconciler(
 	computeInstanceNamespace string,
 	provisioningProvider provisioning.ProvisioningProvider,
 	statusPollInterval time.Duration,
+	maxJobHistory int,
 ) *ComputeInstanceReconciler {
 
 	if computeInstanceNamespace == "" {
@@ -70,13 +78,67 @@ func NewComputeInstanceReconciler(
 		statusPollInterval = 30 * time.Second
 	}
 
+	if maxJobHistory <= 0 {
+		maxJobHistory = DefaultMaxJobHistory
+	}
+
 	return &ComputeInstanceReconciler{
 		Client:                   client,
 		Scheme:                   scheme,
 		ComputeInstanceNamespace: computeInstanceNamespace,
 		ProvisioningProvider:     provisioningProvider,
 		StatusPollInterval:       statusPollInterval,
+		MaxJobHistory:            maxJobHistory,
 	}
+}
+
+// FindLatestJobByType finds the job with the most recent timestamp for the given type.
+// Returns nil if no job of the given type is found.
+// Exported for use by provisioning providers.
+func FindLatestJobByType(jobs []v1alpha1.JobStatus, jobType v1alpha1.JobType) *v1alpha1.JobStatus {
+	var latest *v1alpha1.JobStatus
+	for i := range jobs {
+		if jobs[i].Type == jobType {
+			if latest == nil || jobs[i].Timestamp.After(latest.Timestamp.Time) {
+				latest = &jobs[i]
+			}
+		}
+	}
+	return latest
+}
+
+// findJobByID finds a job by its ID in the jobs array.
+// Returns a pointer to the job if found, nil otherwise.
+// The returned pointer can be used to update the job in place.
+func findJobByID(jobs []v1alpha1.JobStatus, jobID string) *v1alpha1.JobStatus {
+	for i := range jobs {
+		if jobs[i].JobID == jobID {
+			return &jobs[i]
+		}
+	}
+	return nil
+}
+
+// appendJob adds a new job to the jobs array and trims to maxHistory.
+// Jobs are appended in chronological order (oldest first, newest last).
+func (r *ComputeInstanceReconciler) appendJob(jobs []v1alpha1.JobStatus, newJob v1alpha1.JobStatus) []v1alpha1.JobStatus {
+	jobs = append(jobs, newJob)
+	if len(jobs) > r.MaxJobHistory {
+		// Keep only the last MaxJobHistory jobs
+		jobs = jobs[len(jobs)-r.MaxJobHistory:]
+	}
+	return jobs
+}
+
+// updateJob updates an existing job by ID with new values.
+// Returns true if the job was found and updated, false otherwise.
+func updateJob(jobs []v1alpha1.JobStatus, updatedJob v1alpha1.JobStatus) bool {
+	job := findJobByID(jobs, updatedJob.JobID)
+	if job == nil {
+		return false
+	}
+	*job = updatedJob
+	return true
 }
 
 // +kubebuilder:rbac:groups=cloudkit.openshift.io,resources=computeinstances,verbs=get;list;watch;create;update;patch;delete
@@ -243,8 +305,10 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 		return ctrl.Result{}, nil
 	}
 
-	// Check if we already have a job ID
-	if instance.Status.ProvisionJob == nil || instance.Status.ProvisionJob.ID == "" {
+	// Check if we already have a provision job
+	latestProvisionJob := FindLatestJobByType(instance.Status.Jobs, v1alpha1.JobTypeProvision)
+
+	if latestProvisionJob == nil || latestProvisionJob.JobID == "" {
 		// No job yet, trigger provisioning
 		log.Info("triggering provisioning", "provider", r.ProvisioningProvider.Name())
 		result, err := r.ProvisioningProvider.TriggerProvision(ctx, instance)
@@ -258,46 +322,58 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 
 			// Actual error - mark as failed
 			log.Error(err, "failed to trigger provisioning")
-			instance.Status.ProvisionJob = &v1alpha1.JobStatus{
-				State:   string(provisioning.JobStateFailed),
-				Message: fmt.Sprintf("Failed to trigger provisioning: %v", err),
+			newJob := v1alpha1.JobStatus{
+				JobID:     "",
+				Type:      v1alpha1.JobTypeProvision,
+				Timestamp: metav1.Now(),
+				State:     v1alpha1.JobStateFailed,
+				Message:   fmt.Sprintf("Failed to trigger provisioning: %v", err),
 			}
+			instance.Status.Jobs = r.appendJob(instance.Status.Jobs, newJob)
 			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 		}
 
-		instance.Status.ProvisionJob = &v1alpha1.JobStatus{
-			ID:      result.JobID,
-			State:   string(result.InitialState),
-			Message: result.Message,
+		newJob := v1alpha1.JobStatus{
+			JobID:                  result.JobID,
+			Type:                   v1alpha1.JobTypeProvision,
+			Timestamp:              metav1.Now(),
+			State:                  v1alpha1.JobState(result.InitialState),
+			Message:                result.Message,
+			BlockDeletionOnFailure: result.BlockDeletionOnFailure,
 		}
+		instance.Status.Jobs = r.appendJob(instance.Status.Jobs, newJob)
 		log.Info("provisioning job triggered", "jobID", result.JobID)
 		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
 	// We have a job ID, check its status
-	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance, instance.Status.ProvisionJob.ID)
+	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance, latestProvisionJob.JobID)
 	if err != nil {
-		log.Error(err, "failed to get provision job status", "jobID", instance.Status.ProvisionJob.ID)
-		instance.Status.ProvisionJob.Message = fmt.Sprintf("Failed to get job status: %v", err)
+		log.Error(err, "failed to get provision job status", "jobID", latestProvisionJob.JobID)
+		updatedJob := *latestProvisionJob
+		updatedJob.Message = fmt.Sprintf("Failed to get job status: %v", err)
+		updateJob(instance.Status.Jobs, updatedJob)
 		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
-	// Update status fields (main reconcile loop will persist these)
-	instance.Status.ProvisionJob.State = string(status.State)
-	instance.Status.ProvisionJob.Message = status.Message
+	// Update job status
+	updatedJob := *latestProvisionJob
+	updatedJob.State = v1alpha1.JobState(status.State)
+	updatedJob.Message = status.Message
 	if status.ErrorDetails != "" {
-		instance.Status.ProvisionJob.Message = fmt.Sprintf("%s: %s", status.Message, status.ErrorDetails)
+		updatedJob.Message = fmt.Sprintf("%s: %s", status.Message, status.ErrorDetails)
 	}
+	updateJob(instance.Status.Jobs, updatedJob)
 
 	// If job is still running, requeue
 	if !status.State.IsTerminal() {
-		log.Info("provision job still running", "jobID", instance.Status.ProvisionJob.ID, "state", status.State)
+		log.Info("provision job still running", "jobID", latestProvisionJob.JobID, "state", status.State)
 		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
 	// Job is complete
 	if status.State.IsSuccessful() {
-		log.Info("provision job succeeded", "jobID", instance.Status.ProvisionJob.ID)
+		log.Info("provision job succeeded", "jobID", latestProvisionJob.JobID)
 		// Update reconciled version if provided
 		if status.ReconciledVersion != "" {
 			instance.Status.ReconciledConfigVersion = status.ReconciledVersion
@@ -306,7 +382,7 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 	}
 
 	// Job failed
-	log.Error(nil, "provision job failed", "jobID", instance.Status.ProvisionJob.ID, "message", instance.Status.ProvisionJob.Message)
+	log.Error(nil, "provision job failed", "jobID", latestProvisionJob.JobID, "message", updatedJob.Message)
 	instance.Status.Phase = v1alpha1.ComputeInstancePhaseFailed
 	return ctrl.Result{}, nil
 }
