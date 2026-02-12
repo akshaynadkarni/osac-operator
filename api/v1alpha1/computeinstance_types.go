@@ -108,19 +108,60 @@ type TenantReferenceType struct {
 	Namespace string `json:"namespace"`
 }
 
+// JobType represents the type of job operation
+// +kubebuilder:validation:Enum=provision;deprovision
+type JobType string
+
+const (
+	// JobTypeProvision indicates a provisioning operation
+	JobTypeProvision JobType = "provision"
+	// JobTypeDeprovision indicates a deprovisioning operation
+	JobTypeDeprovision JobType = "deprovision"
+)
+
+// JobState represents the current state of a job
+// +kubebuilder:validation:Enum=Pending;Waiting;Running;Succeeded;Failed;Canceled;Unknown
+type JobState string
+
+const (
+	// JobStatePending indicates the job is pending execution
+	JobStatePending JobState = "Pending"
+	// JobStateWaiting indicates the job is waiting for dependencies
+	JobStateWaiting JobState = "Waiting"
+	// JobStateRunning indicates the job is currently running
+	JobStateRunning JobState = "Running"
+	// JobStateSucceeded indicates the job completed successfully
+	JobStateSucceeded JobState = "Succeeded"
+	// JobStateFailed indicates the job failed
+	JobStateFailed JobState = "Failed"
+	// JobStateCanceled indicates the job was canceled
+	JobStateCanceled JobState = "Canceled"
+	// JobStateUnknown indicates the job state is unknown
+	JobStateUnknown JobState = "Unknown"
+)
+
 // JobStatus represents the status of a provisioning or deprovisioning job
 type JobStatus struct {
-	// ID is the job identifier from the provisioning provider
-	// +kubebuilder:validation:Optional
+	// JobID is the job identifier from the provisioning provider
+	// For AAP Direct: job ID from AAP API response
+	// For EDA: auto-incremented "eda-webhook-N"
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Type=string
-	ID string `json:"id,omitempty"`
+	JobID string `json:"jobID"`
+
+	// Type indicates the operation type
+	// +kubebuilder:validation:Required
+	Type JobType `json:"type"`
+
+	// Timestamp when this job was created/triggered
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	Timestamp metav1.Time `json:"timestamp"`
 
 	// State is the current state of the job
-	// Valid values: Pending, Waiting, Running, Succeeded, Failed, Canceled, Unknown
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:Enum=Pending;Waiting;Running;Succeeded;Failed;Canceled;Unknown
-	State string `json:"state,omitempty"`
+	// +kubebuilder:validation:Required
+	State JobState `json:"state"`
 
 	// Message provides human-readable status or error information
 	// +kubebuilder:validation:Optional
@@ -173,13 +214,11 @@ type ComputeInstanceStatus struct {
 	// +kubebuilder:validation:Format=date-time
 	LastRestartedAt *metav1.Time `json:"lastRestartedAt,omitempty"`
 
-	// ProvisionJob tracks the current or last provisioning job status
+	// Jobs tracks the history of provision and deprovision operations
+	// Ordered chronologically, with latest operations at the end
+	// Limited to the last N jobs (configurable via CLOUDKIT_MAX_JOB_HISTORY, default 10)
 	// +kubebuilder:validation:Optional
-	ProvisionJob *JobStatus `json:"provisionJob,omitempty"`
-
-	// DeprovisionJob tracks the current or last deprovisioning job status
-	// +kubebuilder:validation:Optional
-	DeprovisionJob *JobStatus `json:"deprovisionJob,omitempty"`
+	Jobs []JobStatus `json:"jobs,omitempty"`
 }
 
 // +kubebuilder:object:root=true

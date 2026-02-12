@@ -138,40 +138,63 @@ spec:
                   - type
                   type: object
                 type: array
-              deprovisionJob:
-                description: DeprovisionJob tracks the current or last deprovisioning
-                  job status
-                properties:
-                  blockDeletionOnFailure:
-                    description: |-
-                      BlockDeletionOnFailure indicates whether CR deletion should be blocked if this job fails
-                      AAP Direct sets this to true to prevent orphaned cloud resources
-                      EDA sets this to false as webhook handles cleanup
-                    type: boolean
-                  id:
-                    description: ID is the job identifier from the provisioning provider
-                    type: string
-                  message:
-                    description: Message provides human-readable status or error information
-                    type: string
-                  state:
-                    description: |-
-                      State is the current state of the job
-                      Valid values: Pending, Waiting, Running, Succeeded, Failed, Canceled, Unknown
-                    enum:
-                    - Pending
-                    - Waiting
-                    - Running
-                    - Succeeded
-                    - Failed
-                    - Canceled
-                    - Unknown
-                    type: string
-                type: object
               desiredConfigVersion:
                 description: DesiredConfigVersion is the version (hash) of the desired
                   configuration of the ComputeInstance
                 type: string
+              jobs:
+                description: |-
+                  Jobs tracks the history of provision and deprovision operations
+                  Ordered chronologically, with latest operations at the end
+                  Limited to the last N jobs (configurable via CLOUDKIT_MAX_JOB_HISTORY, default 10)
+                items:
+                  description: JobStatus represents the status of a provisioning or
+                    deprovisioning job
+                  properties:
+                    blockDeletionOnFailure:
+                      description: |-
+                        BlockDeletionOnFailure indicates whether CR deletion should be blocked if this job fails
+                        AAP Direct sets this to true to prevent orphaned cloud resources
+                        EDA sets this to false as webhook handles cleanup
+                      type: boolean
+                    jobID:
+                      description: |-
+                        JobID is the job identifier from the provisioning provider
+                        For AAP Direct: job ID from AAP API response
+                        For EDA: auto-incremented "eda-webhook-N"
+                      type: string
+                    message:
+                      description: Message provides human-readable status or error
+                        information
+                      type: string
+                    state:
+                      description: State is the current state of the job
+                      enum:
+                      - Pending
+                      - Waiting
+                      - Running
+                      - Succeeded
+                      - Failed
+                      - Canceled
+                      - Unknown
+                      type: string
+                    timestamp:
+                      description: Timestamp when this job was created/triggered
+                      format: date-time
+                      type: string
+                    type:
+                      description: Type indicates the operation type
+                      enum:
+                      - provision
+                      - deprovision
+                      type: string
+                  required:
+                  - jobID
+                  - state
+                  - timestamp
+                  - type
+                  type: object
+                type: array
               lastRestartedAt:
                 description: |-
                   LastRestartedAt records when the last restart was initiated by the controller.
@@ -189,36 +212,6 @@ spec:
                 - Ready
                 - Deleting
                 type: string
-              provisionJob:
-                description: ProvisionJob tracks the current or last provisioning
-                  job status
-                properties:
-                  blockDeletionOnFailure:
-                    description: |-
-                      BlockDeletionOnFailure indicates whether CR deletion should be blocked if this job fails
-                      AAP Direct sets this to true to prevent orphaned cloud resources
-                      EDA sets this to false as webhook handles cleanup
-                    type: boolean
-                  id:
-                    description: ID is the job identifier from the provisioning provider
-                    type: string
-                  message:
-                    description: Message provides human-readable status or error information
-                    type: string
-                  state:
-                    description: |-
-                      State is the current state of the job
-                      Valid values: Pending, Waiting, Running, Succeeded, Failed, Canceled, Unknown
-                    enum:
-                    - Pending
-                    - Waiting
-                    - Running
-                    - Succeeded
-                    - Failed
-                    - Canceled
-                    - Unknown
-                    type: string
-                type: object
               reconciledConfigVersion:
                 description: ReconciledConfigVersion is the version (hash) of the
                   reconciled configuration of the ComputeInstance
