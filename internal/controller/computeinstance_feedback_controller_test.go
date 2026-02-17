@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cloudkitv1alpha1 "github.com/osac/osac-operator/api/v1alpha1"
@@ -44,6 +45,10 @@ type mockComputeInstancesClient struct {
 	updateCalled   bool
 	updateCount    int
 	lastUpdate     *privatev1.ComputeInstance
+	signalCalled   bool
+	signalCount    int
+	signalID       string
+	signalError    error
 }
 
 func (m *mockComputeInstancesClient) List(ctx context.Context, in *privatev1.ComputeInstancesListRequest, opts ...grpc.CallOption) (*privatev1.ComputeInstancesListResponse, error) {
@@ -76,7 +81,13 @@ func (m *mockComputeInstancesClient) Update(ctx context.Context, in *privatev1.C
 }
 
 func (m *mockComputeInstancesClient) Signal(ctx context.Context, in *privatev1.ComputeInstancesSignalRequest, opts ...grpc.CallOption) (*privatev1.ComputeInstancesSignalResponse, error) {
-	return nil, errors.New("not implemented")
+	m.signalCalled = true
+	m.signalCount++
+	m.signalID = in.GetId()
+	if m.signalError != nil {
+		return nil, m.signalError
+	}
+	return &privatev1.ComputeInstancesSignalResponse{}, nil
 }
 
 var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
@@ -120,7 +131,7 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 	})
 
 	Context("When reconciling a resource that doesn't exist", func() {
-		It("should return without error", func() {
+		It("should return without error and not signal", func() {
 			request := reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      "non-existent",
@@ -131,6 +142,7 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.IsZero()).To(BeTrue())
 			Expect(mockClient.updateCalled).To(BeFalse())
+			Expect(mockClient.signalCalled).To(BeFalse())
 		})
 	})
 
@@ -152,7 +164,9 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			vm := &cloudkitv1alpha1.ComputeInstance{}
 			err := k8sClient.Get(ctx, typeNamespacedName, vm)
 			if err == nil {
-				Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
+				vm.Finalizers = nil
+				_ = k8sClient.Update(ctx, vm)
+				_ = k8sClient.Delete(ctx, vm)
 			}
 		})
 
@@ -165,6 +179,31 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			Expect(result.IsZero()).To(BeTrue())
 			Expect(mockClient.updateCalled).To(BeFalse())
 		})
+
+		It("should remove feedback finalizer from CR without CI ID label being deleted", func() {
+			// Add the feedback finalizer and trigger deletion
+			vm := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, vm)).To(Succeed())
+			vm.Finalizers = []string{cloudkitComputeInstanceFeedbackFinalizer}
+			Expect(k8sClient.Update(ctx, vm)).To(Succeed())
+
+			// Delete triggers DeletionTimestamp
+			Expect(k8sClient.Get(ctx, typeNamespacedName, vm)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+
+			// Verify CR is gone (finalizer removed, GC proceeded)
+			updated := &cloudkitv1alpha1.ComputeInstance{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updated)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			Expect(mockClient.signalCalled).To(BeFalse())
+		})
 	})
 
 	Context("When reconciling a resource that is being deleted", func() {
@@ -176,24 +215,33 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 					Labels: map[string]string{
 						cloudkitComputeInstanceIDLabel: ciID,
 					},
-					Finalizers: []string{cloudkitComputeInstanceFinalizer},
+					Finalizers: []string{cloudkitComputeInstanceFeedbackFinalizer},
 				},
 				Spec: cloudkitv1alpha1.ComputeInstanceSpec{
 					TemplateID: "test_template",
 				},
 			}
 			Expect(k8sClient.Create(ctx, vm)).To(Succeed())
+
+			// Set the phase to Deleting (as the main controller would do in handleDelete)
+			Expect(k8sClient.Get(ctx, typeNamespacedName, vm)).To(Succeed())
+			vm.Status.Phase = cloudkitv1alpha1.ComputeInstancePhaseDeleting
+			Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
+
+			// Delete the CR (sets DeletionTimestamp, CR stays because of finalizer)
+			Expect(k8sClient.Get(ctx, typeNamespacedName, vm)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
-			// Set a valid getResponse in case the reconciler tries to fetch (shouldn't happen but prevents panic)
+
 			mockClient.getResponse = &privatev1.ComputeInstancesGetResponse{
 				Object: &privatev1.ComputeInstance{
 					Id:   ciID,
 					Spec: &privatev1.ComputeInstanceSpec{},
 					Status: &privatev1.ComputeInstanceStatus{
-						State: privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_UNSPECIFIED,
+						State: privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING,
 					},
 				},
 			}
+			mockClient.updateResponse = &privatev1.ComputeInstancesUpdateResponse{}
 		})
 
 		AfterEach(func() {
@@ -206,14 +254,193 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			}
 		})
 
-		It("should skip feedback reconciliation", func() {
+		It("should sync Deleting state to fulfillment service", func() {
 			request := reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			}
 			result, err := reconciler.Reconcile(ctx, request)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.IsZero()).To(BeTrue())
-			Expect(mockClient.updateCalled).To(BeFalse()) // Should not update when deleting
+			Expect(mockClient.updateCalled).To(BeTrue())
+			Expect(mockClient.lastUpdate).NotTo(BeNil())
+			Expect(mockClient.lastUpdate.GetStatus().GetState()).To(Equal(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_DELETING))
+		})
+
+		It("should signal and remove finalizer when it's the last one", func() {
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+			Expect(mockClient.signalCalled).To(BeTrue())
+			Expect(mockClient.signalID).To(Equal(ciID))
+
+			// CR should be gone (finalizer removed, GC proceeds)
+			updated := &cloudkitv1alpha1.ComputeInstance{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updated)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should still remove finalizer when Signal fails", func() {
+			mockClient.signalError = errors.New("already archived")
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+			Expect(mockClient.signalCalled).To(BeTrue())
+
+			// Finalizer should still be removed despite Signal error
+			updated := &cloudkitv1alpha1.ComputeInstance{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updated)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+	})
+
+	Context("When reconciling a resource being deleted with multiple finalizers", func() {
+		const deletingResourceName = "test-ci-multi-fin"
+
+		var deletingNamespacedName types.NamespacedName
+
+		BeforeEach(func() {
+			deletingNamespacedName = types.NamespacedName{
+				Name:      deletingResourceName,
+				Namespace: computeInstanceNS,
+			}
+
+			vm := &cloudkitv1alpha1.ComputeInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deletingResourceName,
+					Namespace: computeInstanceNS,
+					Labels: map[string]string{
+						cloudkitComputeInstanceIDLabel: ciID,
+					},
+					Finalizers: []string{cloudkitComputeInstanceFinalizer, cloudkitComputeInstanceFeedbackFinalizer},
+				},
+				Spec: cloudkitv1alpha1.ComputeInstanceSpec{
+					TemplateID: "test_template",
+				},
+			}
+			Expect(k8sClient.Create(ctx, vm)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, deletingNamespacedName, vm)).To(Succeed())
+			vm.Status.Phase = cloudkitv1alpha1.ComputeInstancePhaseDeleting
+			Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, deletingNamespacedName, vm)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
+
+			mockClient.getResponse = &privatev1.ComputeInstancesGetResponse{
+				Object: &privatev1.ComputeInstance{
+					Id:   ciID,
+					Spec: &privatev1.ComputeInstanceSpec{},
+					Status: &privatev1.ComputeInstanceStatus{
+						State: privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING,
+					},
+				},
+			}
+			mockClient.updateResponse = &privatev1.ComputeInstancesUpdateResponse{}
+		})
+
+		AfterEach(func() {
+			vm := &cloudkitv1alpha1.ComputeInstance{}
+			err := k8sClient.Get(ctx, deletingNamespacedName, vm)
+			if err == nil {
+				vm.Finalizers = nil
+				Expect(k8sClient.Update(ctx, vm)).To(Succeed())
+			}
+		})
+
+		It("should not signal when other finalizers are still present", func() {
+			request := reconcile.Request{
+				NamespacedName: deletingNamespacedName,
+			}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+			// Should sync state but NOT signal
+			Expect(mockClient.updateCalled).To(BeTrue())
+			Expect(mockClient.signalCalled).To(BeFalse())
+
+			// Finalizer should still be present
+			updated := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, deletingNamespacedName, updated)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(updated, cloudkitComputeInstanceFeedbackFinalizer)).To(BeTrue())
+		})
+	})
+
+	Context("When reconciling a resource being deleted without feedback finalizer", func() {
+		const deletingResourceName = "test-ci-no-fb-fin"
+
+		var deletingNamespacedName types.NamespacedName
+
+		BeforeEach(func() {
+			deletingNamespacedName = types.NamespacedName{
+				Name:      deletingResourceName,
+				Namespace: computeInstanceNS,
+			}
+
+			vm := &cloudkitv1alpha1.ComputeInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deletingResourceName,
+					Namespace: computeInstanceNS,
+					Labels: map[string]string{
+						cloudkitComputeInstanceIDLabel: ciID,
+					},
+					Finalizers: []string{cloudkitComputeInstanceFinalizer},
+				},
+				Spec: cloudkitv1alpha1.ComputeInstanceSpec{
+					TemplateID: "test_template",
+				},
+			}
+			Expect(k8sClient.Create(ctx, vm)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, deletingNamespacedName, vm)).To(Succeed())
+			vm.Status.Phase = cloudkitv1alpha1.ComputeInstancePhaseDeleting
+			Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, deletingNamespacedName, vm)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
+
+			mockClient.getResponse = &privatev1.ComputeInstancesGetResponse{
+				Object: &privatev1.ComputeInstance{
+					Id:   ciID,
+					Spec: &privatev1.ComputeInstanceSpec{},
+					Status: &privatev1.ComputeInstanceStatus{
+						State: privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING,
+					},
+				},
+			}
+			mockClient.updateResponse = &privatev1.ComputeInstancesUpdateResponse{}
+		})
+
+		AfterEach(func() {
+			vm := &cloudkitv1alpha1.ComputeInstance{}
+			err := k8sClient.Get(ctx, deletingNamespacedName, vm)
+			if err == nil {
+				vm.Finalizers = nil
+				Expect(k8sClient.Update(ctx, vm)).To(Succeed())
+			}
+		})
+
+		It("should not add finalizer to CR being deleted without feedback finalizer", func() {
+			request := reconcile.Request{
+				NamespacedName: deletingNamespacedName,
+			}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+
+			// Verify feedback finalizer was NOT added
+			updated := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, deletingNamespacedName, updated)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(updated, cloudkitComputeInstanceFeedbackFinalizer)).To(BeFalse())
+			// Signal should NOT be called (our finalizer isn't present)
+			Expect(mockClient.signalCalled).To(BeFalse())
 		})
 	})
 
@@ -275,8 +502,25 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			vm := &cloudkitv1alpha1.ComputeInstance{}
 			err := k8sClient.Get(ctx, typeNamespacedName, vm)
 			if err == nil {
+				// Remove finalizers so the CR can be deleted
+				vm.Finalizers = nil
+				_ = k8sClient.Update(ctx, vm)
 				Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
 			}
+		})
+
+		It("should add feedback finalizer on first reconcile", func() {
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+
+			// Verify feedback finalizer was added
+			updated := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(updated, cloudkitComputeInstanceFeedbackFinalizer)).To(BeTrue())
 		})
 
 		It("should successfully sync conditions and phase", func() {
@@ -341,6 +585,21 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mockClient.updateCalled).To(BeTrue())
 			Expect(mockClient.lastUpdate.GetStatus().GetState()).To(Equal(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_FAILED))
+		})
+
+		It("should sync Deleting phase", func() {
+			vm := &cloudkitv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, vm)).To(Succeed())
+			vm.Status.Phase = cloudkitv1alpha1.ComputeInstancePhaseDeleting
+			Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
+
+			request := reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			}
+			_, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
+			Expect(mockClient.lastUpdate.GetStatus().GetState()).To(Equal(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_DELETING))
 		})
 
 		It("should update only once when reconciliation is run twice with same data", func() {

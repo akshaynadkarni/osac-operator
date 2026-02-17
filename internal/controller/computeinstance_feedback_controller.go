@@ -18,10 +18,12 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	clnt "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ckv1alpha1 "github.com/osac/osac-operator/api/v1alpha1"
@@ -65,57 +67,116 @@ func (r *ComputeInstanceFeedbackReconciler) SetupWithManager(mgr ctrl.Manager) e
 func (r *ComputeInstanceFeedbackReconciler) Reconcile(ctx context.Context, request ctrl.Request) (result ctrl.Result, err error) {
 	log := ctrllog.FromContext(ctx)
 
-	// Fetch the object to reconcile, and do nothing if it no longer exists:
+	// Step 1: Fetch the CR from the hub cluster.
 	object := &ckv1alpha1.ComputeInstance{}
 	err = r.hubClient.Get(ctx, request.NamespacedName, object)
 	if err != nil {
-		err = clnt.IgnoreNotFound(err)
-		return //nolint:nakedret
+		if !apierrors.IsNotFound(err) {
+			return result, err
+		}
+		// CR is gone. With the finalizer this shouldn't normally happen, but
+		// handle gracefully (e.g. finalizer was removed externally).
+		log.Info("CR not found, nothing to do")
+		err = nil
+		return result, err
 	}
 
-	// Get the identifier of the compute instance from the labels. If this isn't present it means that the object wasn't
-	// created by the fulfillment service, so we ignore it.
+	// Step 2: Get the compute instance ID from labels. CRs without this label
+	// weren't created by the fulfillment service, so we ignore them.
 	ciID, ok := object.Labels[cloudkitComputeInstanceIDLabel]
 	if !ok {
+		// If being deleted and somehow has our finalizer, remove it to unblock deletion.
+		if !object.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(object, cloudkitComputeInstanceFeedbackFinalizer) {
+			log.Info("CR without CI ID label is being deleted, removing feedback finalizer")
+			if controllerutil.RemoveFinalizer(object, cloudkitComputeInstanceFeedbackFinalizer) {
+				err = r.hubClient.Update(ctx, object)
+			}
+			return result, err
+		}
 		log.Info(
 			"There is no label containing the compute instance identifier, will ignore it",
 			"label", cloudkitComputeInstanceIDLabel,
 		)
-		return
+		return result, err
 	}
 
-	// Check if the VM is being deleted before fetching from fulfillment service
-	if !object.ObjectMeta.DeletionTimestamp.IsZero() {
-		log.Info(
-			"ComputeInstance is being deleted, skipping feedback reconciliation",
-		)
-		return
-	}
-
-	// Fetch the compute instance:
+	// Step 3: Fetch the compute instance record from the fulfillment service
+	// so we can compare before/after and only push changes.
 	ci, err := r.fetchComputeInstance(ctx, ciID)
 	if err != nil {
-		return
+		return result, err
 	}
 
-	// Create a task to do the rest of the job, but using copies of the objects, so that we can later compare the
-	// before and after values and save only the objects that have changed.
 	t := &computeInstanceFeedbackReconcilerTask{
 		r:      r,
 		object: object,
 		ci:     clone(ci),
 	}
 
-	t.handleUpdate(ctx)
+	// Step 4: Sync CR state to the fulfillment service record.
+	// handleUpdate also adds our finalizer; handleDelete only syncs state
+	// (e.g. DELETING phase).
+	if object.DeletionTimestamp.IsZero() {
+		err = t.handleUpdate(ctx)
+	} else {
+		t.handleDelete(ctx)
+	}
+	if err != nil {
+		return result, err
+	}
 
-	// Save the objects that have changed:
+	// Step 5: Persist synced state to the fulfillment service.
 	err = r.saveComputeInstance(ctx, ci, t.ci)
 	if err != nil {
-		return
+		return result, err
 	}
-	return
+
+	// Step 6: Handle finalizer removal and signal for deletions. This must
+	// happen after step 5 so the DELETING state is persisted before the CR
+	// is garbage collected.
+	if !object.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(object, cloudkitComputeInstanceFeedbackFinalizer) {
+		if len(object.GetFinalizers()) == 1 {
+			// We're the last finalizer. Remove it to trigger CR garbage
+			// collection, then signal the fulfillment service to immediately
+			// re-reconcile. Finalizer is removed first so the CR is gone
+			// before the fulfillment controller checks — avoiding a race
+			// where it sees the CR still exists and skips archival.
+			log.Info(
+				"Feedback finalizer is last remaining, removing finalizer and signaling",
+				"ciID", ciID,
+			)
+			if controllerutil.RemoveFinalizer(object, cloudkitComputeInstanceFeedbackFinalizer) {
+				err = r.hubClient.Update(ctx, object)
+				if err != nil {
+					return result, err
+				}
+			}
+			_, signalErr := r.computeInstancesClient.Signal(ctx, privatev1.ComputeInstancesSignalRequest_builder{
+				Id: ciID,
+			}.Build())
+			if signalErr != nil {
+				log.Error(
+					signalErr,
+					"Failed to signal fulfillment service, periodic sync will handle cleanup",
+					"ciID", ciID,
+				)
+			}
+		} else {
+			// Other finalizers still present — another controller hasn't
+			// finished cleanup yet. When it removes its finalizer, the
+			// Update event will trigger a new reconcile.
+			log.Info(
+				"Other finalizers still present, waiting",
+				"finalizers", object.GetFinalizers(),
+			)
+		}
+	}
+
+	return result, err
 }
 
+// fetchComputeInstance retrieves a compute instance record from the fulfillment
+// service by its ID, ensuring spec and status are initialized.
 func (r *ComputeInstanceFeedbackReconciler) fetchComputeInstance(ctx context.Context, id string) (vm *privatev1.ComputeInstance, err error) {
 	response, err := r.computeInstancesClient.Get(ctx, privatev1.ComputeInstancesGetRequest_builder{
 		Id: id,
@@ -133,6 +194,8 @@ func (r *ComputeInstanceFeedbackReconciler) fetchComputeInstance(ctx context.Con
 	return
 }
 
+// saveComputeInstance sends an update to the fulfillment service if the compute
+// instance record has changed.
 func (r *ComputeInstanceFeedbackReconciler) saveComputeInstance(ctx context.Context, before, after *privatev1.ComputeInstance) error {
 	log := ctrllog.FromContext(ctx)
 
@@ -152,7 +215,27 @@ func (r *ComputeInstanceFeedbackReconciler) saveComputeInstance(ctx context.Cont
 	return nil
 }
 
-func (t *computeInstanceFeedbackReconcilerTask) handleUpdate(ctx context.Context) {
+// handleUpdate ensures our finalizer is present and syncs the CR state to the
+// fulfillment service. Called when the CR is not being deleted.
+func (t *computeInstanceFeedbackReconcilerTask) handleUpdate(ctx context.Context) error {
+	if controllerutil.AddFinalizer(t.object, cloudkitComputeInstanceFeedbackFinalizer) {
+		if err := t.r.hubClient.Update(ctx, t.object); err != nil {
+			return err
+		}
+	}
+	t.syncState(ctx)
+	return nil
+}
+
+// handleDelete syncs the CR state (including the DELETING phase) to the
+// fulfillment service. Called when the CR is being deleted.
+func (t *computeInstanceFeedbackReconcilerTask) handleDelete(ctx context.Context) {
+	t.syncState(ctx)
+}
+
+// syncState synchronizes the CR's conditions, phase, IP address, and last
+// restarted time to the fulfillment service's compute instance record.
+func (t *computeInstanceFeedbackReconcilerTask) syncState(ctx context.Context) {
 	t.syncConditions(ctx)
 	t.syncPhase(ctx)
 	t.syncIPAddress()
@@ -255,6 +338,8 @@ func (t *computeInstanceFeedbackReconcilerTask) syncPhase(ctx context.Context) {
 		t.syncPhaseFailed()
 	case ckv1alpha1.ComputeInstancePhaseRunning:
 		t.syncPhaseRunning()
+	case ckv1alpha1.ComputeInstancePhaseDeleting:
+		t.syncPhaseDeleting()
 	default:
 		log := ctrllog.FromContext(ctx)
 		log.Info(
@@ -275,6 +360,10 @@ func (t *computeInstanceFeedbackReconcilerTask) syncPhaseFailed() {
 func (t *computeInstanceFeedbackReconcilerTask) syncPhaseRunning() {
 	ciStatus := t.ci.GetStatus()
 	ciStatus.SetState(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING)
+}
+
+func (t *computeInstanceFeedbackReconcilerTask) syncPhaseDeleting() {
+	t.ci.GetStatus().SetState(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_DELETING)
 }
 
 func (t *computeInstanceFeedbackReconcilerTask) findComputeInstanceCondition(kind privatev1.ComputeInstanceConditionType) *privatev1.ComputeInstanceCondition {
