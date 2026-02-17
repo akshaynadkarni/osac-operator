@@ -397,6 +397,9 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 
 	// Trigger deprovisioning - provider decides internally if ready
 	if latestDeprovisionJob == nil || latestDeprovisionJob.JobID == "" {
+		// Ensure backward compatibility by populating templateParameters from explicit fields
+		ensureBackwardCompatibility(instance)
+
 		log.Info("triggering deprovisioning", "provider", r.ProvisioningProvider.Name())
 
 		result, err := r.ProvisioningProvider.TriggerDeprovision(ctx, instance)
