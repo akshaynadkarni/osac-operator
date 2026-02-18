@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cloudkitv1alpha1 "github.com/innabox/cloudkit-operator/api/v1alpha1"
+	cloudkitv1alpha1 "github.com/osac/osac-operator/api/v1alpha1"
 )
 
 var _ = Describe("ensureBackwardCompatibility", func() {
