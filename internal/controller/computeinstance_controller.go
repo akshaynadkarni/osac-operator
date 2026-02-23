@@ -526,7 +526,12 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 	log := ctrllog.FromContext(ctx)
 
 	r.initializeStatusConditions(instance)
-	instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
+	// Only set Starting phase for first-time provisioning.
+	// If the instance was already successfully provisioned (has a ReconciledConfigVersion),
+	// keep the current phase to avoid regressing from Running to Starting during re-provisioning.
+	if instance.Status.ReconciledConfigVersion == "" {
+		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
+	}
 
 	if controllerutil.AddFinalizer(instance, osacComputeInstanceFinalizer) {
 		if err := r.Update(ctx, instance); err != nil {
@@ -594,7 +599,10 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
+	// Only regress to Starting for first-time provisioning; keep Running during re-provisioning
+	if instance.Status.ReconciledConfigVersion == "" {
+		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
+	}
 	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProgressing, metav1.ConditionTrue, "Applying configuration", v1alpha1.ReasonAsExpected)
 
 	// Handle provisioning via provider abstraction
