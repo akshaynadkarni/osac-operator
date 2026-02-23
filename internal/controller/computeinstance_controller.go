@@ -547,13 +547,16 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 
 	// If the tenant doesn't exist, create it and requeue
 	if tenant == nil {
-		return ctrl.Result{}, r.createOrUpdateTenant(ctx, instance)
+		if err := r.createOrUpdateTenant(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// If the tenant is not ready, requeue
 	if tenant.Status.Phase != v1alpha1.TenantPhaseReady {
 		log.Info("tenant is not ready, requeueing", "tenant", tenant.GetName())
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionAccepted, metav1.ConditionTrue, "", v1alpha1.ReasonAsExpected)
