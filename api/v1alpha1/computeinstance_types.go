@@ -82,7 +82,6 @@ type ComputeInstanceSpec struct {
 	// This complements the explicit fields (cores, memoryGiB, etc.) and is used for:
 	// - Template-specific parameters not covered by explicit fields (e.g., exposed_ports)
 	// - Custom parameters defined by specific templates
-	// - Backward compatibility with existing ComputeInstances
 	// +kubebuilder:validation:Optional
 	TemplateParameters string `json:"templateParameters,omitempty"`
 
