@@ -366,7 +366,7 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 	}
 
 	// Job failed
-	log.Error(nil, "provision job failed", "jobID", latestProvisionJob.JobID, "message", updatedJob.Message)
+	log.Info("provision job failed", "jobID", latestProvisionJob.JobID, "message", updatedJob.Message)
 	instance.Status.Phase = v1alpha1.ComputeInstancePhaseFailed
 	return ctrl.Result{}, nil
 }
@@ -496,7 +496,7 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 	// Check policy stored in job status
 	if latestDeprovisionJob.BlockDeletionOnFailure {
 		// Block deletion to prevent orphaned resources
-		log.Error(nil, "deprovision job failed, blocking deletion to prevent orphaned resources",
+		log.Info("deprovision job failed, blocking deletion to prevent orphaned resources",
 			"jobID", latestDeprovisionJob.JobID,
 			"state", status.State,
 			"message", updatedJob.Message)
@@ -674,7 +674,7 @@ func (r *ComputeInstanceReconciler) initializeStatusConditions(instance *v1alpha
 	)
 }
 
-// initializeStatusCondition initializes a condition, but only it is not already initialized.
+// initializeStatusCondition initializes a condition, but only if it is not already initialized.
 func (r *ComputeInstanceReconciler) initializeStatusCondition(instance *v1alpha1.ComputeInstance,
 	conditionType v1alpha1.ComputeInstanceConditionType, status metav1.ConditionStatus, reason string) {
 	if instance.Status.Conditions == nil {

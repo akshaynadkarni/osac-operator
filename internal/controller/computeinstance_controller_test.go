@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -560,7 +561,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 				baseTime := time.Now().UTC()
 				for i := 1; i <= 15; i++ {
 					newJob := osacv1alpha1.JobStatus{
-						JobID:     "job-" + string(rune('0'+i)),
+						JobID:     fmt.Sprintf("job-%d", i),
 						Type:      osacv1alpha1.JobTypeProvision,
 						Timestamp: metav1.NewTime(baseTime.Add(time.Duration(i) * time.Second)),
 						State:     osacv1alpha1.JobStatePending,
