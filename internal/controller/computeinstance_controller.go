@@ -514,18 +514,20 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Request, instance *v1alpha1.ComputeInstance) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
+	if controllerutil.AddFinalizer(instance, osacComputeInstanceFinalizer) {
+		if err := r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Initialize status after the finalizer update, because r.Update() overwrites
+	// the in-memory status with the server response (status subresource is separate).
 	r.initializeStatusConditions(instance)
 	// Only set Starting phase for first-time provisioning.
 	// If the instance was already successfully provisioned (has a ReconciledConfigVersion),
 	// keep the current phase to avoid regressing from Running to Starting during re-provisioning.
 	if instance.Status.ReconciledConfigVersion == "" {
 		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
-	}
-
-	if controllerutil.AddFinalizer(instance, osacComputeInstanceFinalizer) {
-		if err := r.Update(ctx, instance); err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 
 	// Get the tenant
