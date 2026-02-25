@@ -560,8 +560,6 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionAccepted, metav1.ConditionTrue, "", v1alpha1.ReasonAsExpected)
-
 	kv, err := r.findKubeVirtVMs(ctx, instance, tenant.Status.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -588,7 +586,7 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 
 	if instance.Status.DesiredConfigVersion == instance.Status.ReconciledConfigVersion {
 		instance.Status.Phase = v1alpha1.ComputeInstancePhaseRunning
-		instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProgressing, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
+		instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionConfigurationApplied, metav1.ConditionTrue, "", v1alpha1.ReasonAsExpected)
 
 		// If we're tracking a provision job that hasn't reached terminal state, continue polling
 		// This ensures job status fields are accurate and reflect the final job outcome
@@ -607,7 +605,7 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ ctrl.Req
 	if instance.Status.ReconciledConfigVersion == "" {
 		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
 	}
-	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProgressing, metav1.ConditionTrue, "Applying configuration", v1alpha1.ReasonAsExpected)
+	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionConfigurationApplied, metav1.ConditionFalse, "Applying configuration", v1alpha1.ReasonAsExpected)
 
 	// Handle provisioning via provider abstraction
 	return r.handleProvisioning(ctx, instance)
@@ -650,14 +648,8 @@ func (r *ComputeInstanceReconciler) handleDelete(ctx context.Context, _ ctrl.Req
 func (r *ComputeInstanceReconciler) initializeStatusConditions(instance *v1alpha1.ComputeInstance) {
 	r.initializeStatusCondition(
 		instance,
-		v1alpha1.ComputeInstanceConditionAccepted,
-		metav1.ConditionTrue,
-		v1alpha1.ReasonInitialized,
-	)
-	r.initializeStatusCondition(
-		instance,
-		v1alpha1.ComputeInstanceConditionProgressing,
-		metav1.ConditionTrue,
+		v1alpha1.ComputeInstanceConditionConfigurationApplied,
+		metav1.ConditionFalse,
 		v1alpha1.ReasonInitialized,
 	)
 	r.initializeStatusCondition(
@@ -708,7 +700,6 @@ func (r *ComputeInstanceReconciler) handleKubeVirtVM(ctx context.Context, instan
 	name := kv.GetName()
 	instance.SetVirtualMachineReferenceKubeVirtVirtualMachineName(name)
 	instance.SetVirtualMachineReferenceNamespace(kv.GetNamespace())
-	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionAccepted, metav1.ConditionTrue, "", v1alpha1.ReasonAsExpected)
 
 	if kvVMHasConditionWithStatus(kv, kubevirtv1.VirtualMachineReady, corev1.ConditionTrue) {
 		log.Info("KubeVirt virtual machine (kubevirt resource) is ready", "computeinstance", instance.GetName())

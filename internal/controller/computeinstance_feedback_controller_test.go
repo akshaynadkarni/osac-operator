@@ -459,17 +459,10 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			vm.Status.Phase = osacv1alpha1.ComputeInstancePhaseRunning
 			vm.Status.Conditions = []metav1.Condition{
 				{
-					Type:               string(osacv1alpha1.ComputeInstanceConditionAccepted),
+					Type:               string(osacv1alpha1.ComputeInstanceConditionConfigurationApplied),
 					Status:             metav1.ConditionFalse,
-					Reason:             "Accepted",
-					Message:            "VM is accepted",
-					LastTransitionTime: metav1.NewTime(time.Now().UTC()),
-				},
-				{
-					Type:               string(osacv1alpha1.ComputeInstanceConditionProgressing),
-					Status:             metav1.ConditionTrue,
-					Reason:             "Progressing",
-					Message:            "VM is progressing",
+					Reason:             "AsExpected",
+					Message:            "Applying configuration",
 					LastTransitionTime: metav1.NewTime(time.Now().UTC()),
 				},
 			}
@@ -525,7 +518,7 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			Expect(mockClient.lastUpdate.GetStatus().GetState()).To(Equal(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING))
 		})
 
-		It("should sync Progressing condition to Progressing condition", func() {
+		It("should sync ConfigurationApplied condition", func() {
 			request := reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			}
@@ -537,9 +530,9 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 			vm := mockClient.lastUpdate
 			found := false
 			for _, cond := range vm.GetStatus().GetConditions() {
-				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_PROGRESSING {
-					Expect(cond.GetStatus()).To(Equal(sharedv1.ConditionStatus_CONDITION_STATUS_TRUE))
-					Expect(cond.GetMessage()).To(Equal("VM is progressing"))
+				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_CONFIGURATION_APPLIED {
+					Expect(cond.GetStatus()).To(Equal(sharedv1.ConditionStatus_CONDITION_STATUS_FALSE))
+					Expect(cond.GetMessage()).To(Equal("Applying configuration"))
 					found = true
 					break
 				}

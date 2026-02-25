@@ -243,41 +243,19 @@ func (t *computeInstanceFeedbackReconcilerTask) syncState(ctx context.Context) {
 }
 
 func (t *computeInstanceFeedbackReconcilerTask) syncConditions(ctx context.Context) {
-	t.syncProgressing(ctx)
+	t.syncConfigurationApplied(ctx)
 	t.syncAvailable(ctx)
 	t.syncRestartInProgress(ctx)
 	t.syncRestartFailed(ctx)
 }
 
-// syncProgressing synchronizes the PROGRESSING VM condition from multiple CR conditions.
-// If any of Progressing, or Accepted is true, then PROGRESSING is set to true.
-func (t *computeInstanceFeedbackReconcilerTask) syncProgressing(ctx context.Context) {
-	progressingCondition := t.object.GetStatusCondition(ckv1alpha1.ComputeInstanceConditionProgressing)
-	acceptedCondition := t.object.GetStatusCondition(ckv1alpha1.ComputeInstanceConditionAccepted)
-
-	var newStatus sharedv1.ConditionStatus
-	var message string
-
-	if t.object.IsStatusConditionUnknown(ckv1alpha1.ComputeInstanceConditionProgressing) && t.object.IsStatusConditionUnknown(ckv1alpha1.ComputeInstanceConditionAccepted) {
-		newStatus = sharedv1.ConditionStatus_CONDITION_STATUS_UNSPECIFIED
-	} else if t.object.IsStatusConditionTrue(ckv1alpha1.ComputeInstanceConditionProgressing) {
-		newStatus = t.mapConditionStatus(progressingCondition.Status)
-		message = progressingCondition.Message
-	} else if t.object.IsStatusConditionTrue(ckv1alpha1.ComputeInstanceConditionAccepted) {
-		newStatus = t.mapConditionStatus(acceptedCondition.Status)
-		message = acceptedCondition.Message
-	} else {
-		newStatus = sharedv1.ConditionStatus_CONDITION_STATUS_FALSE
+// syncConfigurationApplied synchronizes the CONFIGURATION_APPLIED VM condition from the ConfigurationApplied CR condition.
+func (t *computeInstanceFeedbackReconcilerTask) syncConfigurationApplied(ctx context.Context) {
+	crCondition := t.object.GetStatusCondition(ckv1alpha1.ComputeInstanceConditionConfigurationApplied)
+	if crCondition == nil {
+		return
 	}
-
-	vmCondition := t.findComputeInstanceCondition(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_PROGRESSING)
-	oldStatus := vmCondition.GetStatus()
-
-	vmCondition.SetStatus(newStatus)
-	vmCondition.SetMessage(message)
-	if newStatus != oldStatus {
-		vmCondition.SetLastTransitionTime(timestamppb.Now())
-	}
+	t.syncVMConditionFromCR(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_CONFIGURATION_APPLIED, crCondition)
 }
 
 // syncAvailable synchronizes the AVAILABLE VM condition from the Available CR condition.
