@@ -41,8 +41,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	cluster "sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -50,6 +52,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
+	"sigs.k8s.io/multicluster-runtime/providers/single"
 
 	v1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac-operator/internal/aap"
@@ -60,7 +64,6 @@ import (
 )
 
 var (
-	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
 
@@ -86,11 +89,16 @@ const (
 	// Tenant configuration
 	envTenantNamespace = "OSAC_TENANT_NAMESPACE"
 
+	// Remote cluster (tenant and compute-instance controllers)
+	envRemoteClusterKubeconfig = "OSAC_REMOTE_CLUSTER_KUBECONFIG"
+
 	// Controller enable flags (defaults when flag is not set)
 	envEnableTenantController          = "OSAC_ENABLE_TENANT_CONTROLLER"
 	envEnableHostPoolController        = "OSAC_ENABLE_HOST_POOL_CONTROLLER"
 	envEnableComputeInstanceController = "OSAC_ENABLE_COMPUTE_INSTANCE_CONTROLLER"
 	envEnableClusterController         = "OSAC_ENABLE_CLUSTER_CONTROLLER"
+
+	remoteClusterName = "remote"
 )
 
 // parsePollInterval parses a poll interval from environment variable with fallback to default.
@@ -133,24 +141,61 @@ func parseIntEnv(envVar string, defaultValue int) int {
 	return value
 }
 
-// addSchemesForControllers registers only the API schemes required by the enabled controllers.
+// addSchemesForLocalControllers registers only the API schemes required by the enabled controllers.
 // Must be called before creating the manager.
-func addSchemesForControllers(
-	s *runtime.Scheme,
+func addSchemesForLocalControllers(
+	localScheme *runtime.Scheme,
 	enableCluster, enableHostPool, enableComputeInstance, enableTenant bool,
 ) {
-	utilruntime.Must(clientgoscheme.AddToScheme(s))
-	utilruntime.Must(v1alpha1.AddToScheme(s))
+	utilruntime.Must(clientgoscheme.AddToScheme(localScheme))
+	utilruntime.Must(v1alpha1.AddToScheme(localScheme))
 	if enableCluster {
-		utilruntime.Must(hypershiftv1beta1.AddToScheme(s))
+		utilruntime.Must(hypershiftv1beta1.AddToScheme(localScheme))
 	}
 	if enableComputeInstance {
-		utilruntime.Must(kubevirtv1.AddToScheme(s))
+		utilruntime.Must(kubevirtv1.AddToScheme(localScheme))
 	}
 	if enableTenant {
-		utilruntime.Must(ovnv1.AddToScheme(s))
+		utilruntime.Must(ovnv1.AddToScheme(localScheme))
 	}
 	// +kubebuilder:scaffold:scheme
+}
+
+// addSchemesForRemoteControllers registers only the API schemes required by the enabled controllers.
+// Must be called before creating the manager.
+func addSchemesForRemoteControllers(
+	localScheme *runtime.Scheme,
+	remoteScheme *runtime.Scheme,
+	enableComputeInstance, enableTenant bool,
+) {
+	utilruntime.Must(clientgoscheme.AddToScheme(localScheme))
+	utilruntime.Must(v1alpha1.AddToScheme(localScheme))
+
+	utilruntime.Must(clientgoscheme.AddToScheme(remoteScheme))
+	if enableComputeInstance {
+		utilruntime.Must(kubevirtv1.AddToScheme(remoteScheme))
+	}
+	if enableTenant {
+		utilruntime.Must(ovnv1.AddToScheme(remoteScheme))
+	}
+	// +kubebuilder:scaffold:scheme
+}
+
+// newClusterFromKubeconfig creates a controller-runtime cluster from a kubeconfig file path.
+// The cluster uses the given scheme for type resolution. The caller is responsible for
+// starting the cluster (e.g. in a goroutine with cl.Start(ctx)) so it runs with the manager.
+func newClusterFromKubeconfig(kubeconfigPath string, scheme *runtime.Scheme) (cluster.Cluster, error) {
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("build config from kubeconfig %q: %w", kubeconfigPath, err)
+	}
+	cl, err := cluster.New(config, func(o *cluster.Options) {
+		o.Scheme = scheme
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create cluster from kubeconfig: %w", err)
+	}
+	return cl, nil
 }
 
 // createEDAProvider creates and validates EDA webhook provider configuration.
@@ -286,6 +331,10 @@ func setupComputeInstanceControllers(
 ) error {
 	localMgr := mgr.GetLocalManager()
 	computeInstanceNamespace := os.Getenv(envComputeInstanceNamespace)
+	targetCluster := mcmanager.LocalCluster
+	if mgr.GetProvider() != nil {
+		targetCluster = remoteClusterName
+	}
 	providerTypeStr := os.Getenv(envProvisioningProvider)
 	provisionWebhook := os.Getenv(envComputeInstanceProvisionWebhook)
 	deprovisionWebhook := os.Getenv(envComputeInstanceDeprovisionWebhook)
@@ -316,12 +365,12 @@ func setupComputeInstanceControllers(
 		}
 	}
 	if err := (controller.NewComputeInstanceReconciler(
-		localMgr.GetClient(),
-		localMgr.GetScheme(),
+		mgr,
 		computeInstanceNamespace,
 		computeInstanceProvider,
 		statusPollInterval,
 		maxJobHistory,
+		targetCluster,
 	)).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("computeinstance controller: %w", err)
 	}
@@ -330,12 +379,16 @@ func setupComputeInstanceControllers(
 
 // setupTenantController registers the Tenant controller.
 func setupTenantController(mgr mcmanager.Manager) error {
-	localMgr := mgr.GetLocalManager()
+	targetCluster := mcmanager.LocalCluster
+	if mgr.GetProvider() != nil {
+		targetCluster = remoteClusterName
+	}
+
 	tenantNamespace := os.Getenv(envTenantNamespace)
 	if err := (controller.NewTenantReconciler(
-		localMgr.GetClient(),
-		localMgr.GetScheme(),
+		mgr,
 		tenantNamespace,
+		targetCluster,
 	)).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("tenant controller: %w", err)
 	}
@@ -343,6 +396,8 @@ func setupTenantController(mgr mcmanager.Manager) error {
 }
 
 func main() {
+	var err error
+
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
@@ -352,6 +407,7 @@ func main() {
 	var grpcInsecure bool
 	var grpcTokenFile string
 	var fulfillmentServerAddress string
+	var remoteClusterKubeconfig string
 	var minimumRequestInterval time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -393,6 +449,12 @@ func main() {
 		helpers.GetEnvWithDefault("OSAC_MINIMUM_REQUEST_INTERVAL", time.Duration(0)),
 		"Minimum amount of time between calls to the same webook url",
 	)
+	flag.StringVar(
+		&remoteClusterKubeconfig,
+		"remote-cluster-kubeconfig",
+		os.Getenv(envRemoteClusterKubeconfig),
+		"Path to the kubeconfig for the remote cluster (supported by tenant and compute-instance controllers only).",
+	)
 
 	// Controller enable flags. Defaults from env; if none are set (flag or env), all controllers are enabled.
 	var enableTenantController bool
@@ -420,6 +482,11 @@ func main() {
 	if !enableTenantController && !enableHostPoolController && !enableComputeInstanceController && !enableClusterController {
 		enableTenantController, enableHostPoolController, enableComputeInstanceController, enableClusterController = true, true, true, true
 		setupLog.Info("no controller flags set, enabling all controllers")
+	}
+
+	if remoteClusterKubeconfig != "" && (enableHostPoolController || enableClusterController) {
+		setupLog.Error(nil, "remote cluster kubeconfig option is not supported along with host-pool and cluster controllers")
+		os.Exit(1)
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -467,15 +534,35 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	addSchemesForControllers(scheme,
-		enableClusterController,
-		enableHostPoolController,
-		enableComputeInstanceController,
-		enableTenantController,
-	)
+	// Add the schemes depending if controllers reconcile locally or remotely
+	localScheme := runtime.NewScheme()
+	var remoteScheme *runtime.Scheme
+	var remoteProvider multicluster.Provider
+	var remoteCluster cluster.Cluster
+	if remoteClusterKubeconfig == "" {
+		localScheme = runtime.NewScheme()
+		addSchemesForLocalControllers(localScheme,
+			enableClusterController,
+			enableHostPoolController,
+			enableComputeInstanceController,
+			enableTenantController,
+		)
+	} else {
+		remoteScheme = runtime.NewScheme()
+		addSchemesForRemoteControllers(localScheme, remoteScheme,
+			enableComputeInstanceController,
+			enableTenantController,
+		)
+		remoteCluster, err = newClusterFromKubeconfig(remoteClusterKubeconfig, remoteScheme)
+		if err != nil {
+			setupLog.Error(err, "unable to create remote cluster from kubeconfig")
+			os.Exit(1)
+		}
+		remoteProvider = single.New(remoteClusterName, remoteCluster)
+	}
 
-	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), nil, manager.Options{
-		Scheme:                 scheme,
+	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), remoteProvider, manager.Options{
+		Scheme:                 localScheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -550,8 +637,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+
+	if remoteCluster != nil {
+		setupLog.Info("starting remote cluster")
+		go func() {
+			err := remoteCluster.Start(ctx)
+			if err != nil {
+				setupLog.Error(err, "unable to start remote cluster")
+				os.Exit(1)
+			}
+		}()
+	}
+	if remoteProvider != nil {
+		setupLog.Info("starting remote provider")
+		go remoteProvider.(multicluster.ProviderRunnable).Start(ctx, mgr)
+	}
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

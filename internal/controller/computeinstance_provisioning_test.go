@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	osacv1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac-operator/internal/provisioning"
@@ -103,12 +104,7 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 			},
 			Spec: newTestComputeInstanceSpec("test_template"),
 		}
-		reconciler = &ComputeInstanceReconciler{
-			Client:             k8sClient,
-			Scheme:             k8sClient.Scheme(),
-			StatusPollInterval: 30 * time.Second,
-			MaxJobHistory:      DefaultMaxJobHistory,
-		}
+		reconciler = NewComputeInstanceReconciler(testMcManager, "", &mockProvisioningProvider{}, 30*time.Second, DefaultMaxJobHistory, mcmanager.LocalCluster)
 	})
 
 	Context("handleProvisioning", func() {

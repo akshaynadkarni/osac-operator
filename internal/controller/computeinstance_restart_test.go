@@ -27,6 +27,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	osacv1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
 )
@@ -36,10 +37,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 	ctx := context.Background()
 
 	BeforeEach(func() {
-		reconciler = &ComputeInstanceReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
-		}
+		reconciler = NewComputeInstanceReconciler(testMcManager, "", nil, 0, 0, mcmanager.LocalCluster)
 	})
 
 	Context("handleRestartRequest", func() {
@@ -54,7 +52,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				Spec: spec,
 			}
 
-			result, err := reconciler.handleRestartRequest(ctx, ci)
+			result, err := reconciler.handleRestartRequest(ctx, ci, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 		})
@@ -81,7 +79,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 
 			// Note: performRestart will fail due to no VM reference, but handleRestartRequest
 			// should still call it (we're testing the flow, not the success)
-			_, _ = reconciler.handleRestartRequest(ctx, ci)
+			_, _ = reconciler.handleRestartRequest(ctx, ci, nil)
 
 			// Cleanup
 			_ = k8sClient.Delete(ctx, ci)
@@ -102,7 +100,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				},
 			}
 
-			result, err := reconciler.handleRestartRequest(ctx, ci)
+			result, err := reconciler.handleRestartRequest(ctx, ci, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 		})
@@ -123,7 +121,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				},
 			}
 
-			result, err := reconciler.handleRestartRequest(ctx, ci)
+			result, err := reconciler.handleRestartRequest(ctx, ci, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 		})
@@ -150,7 +148,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Note: performRestart will fail due to no VM reference
-			_, _ = reconciler.handleRestartRequest(ctx, ci)
+			_, _ = reconciler.handleRestartRequest(ctx, ci, nil)
 
 			// Cleanup
 			_ = k8sClient.Delete(ctx, ci)
@@ -175,7 +173,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 			err := k8sClient.Create(ctx, ci)
 			Expect(err).NotTo(HaveOccurred())
 
-			result, err := reconciler.performRestart(ctx, ci)
+			result, err := reconciler.performRestart(ctx, ci, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 			// Update status (normally done by main Reconcile loop)
@@ -240,7 +238,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 			})
 
 			// Perform restart
-			result, err := reconciler.performRestart(ctx, ci)
+			result, err := reconciler.performRestart(ctx, ci, k8sClient)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 
@@ -275,7 +273,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				},
 			}
 
-			err := reconciler.checkRestartCompletion(ctx, ci)
+			err := reconciler.checkRestartCompletion(ctx, ci, k8sClient)
 			Expect(err).NotTo(HaveOccurred())
 			// lastRestartedAt should still be nil
 			Expect(ci.Status.LastRestartedAt).To(BeNil())
@@ -321,7 +319,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				_ = k8sClient.Delete(ctx, vmi)
 			})
 
-			err = reconciler.checkRestartCompletion(ctx, ci)
+			err = reconciler.checkRestartCompletion(ctx, ci, k8sClient)
 			Expect(err).NotTo(HaveOccurred())
 
 			// lastRestartedAt should still be nil
@@ -371,7 +369,7 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				_ = k8sClient.Delete(ctx, vmi)
 			})
 
-			err = reconciler.checkRestartCompletion(ctx, ci)
+			err = reconciler.checkRestartCompletion(ctx, ci, k8sClient)
 			Expect(err).NotTo(HaveOccurred())
 
 			// lastRestartedAt should now be set
@@ -424,14 +422,8 @@ var _ = Describe("ComputeInstance Restart Handler", func() {
 				_ = k8sClient.Delete(ctx, vmi)
 			})
 
-			// Wait for the client to see the VMI
-			clusterClient := k8sClient
-			Eventually(func() error {
-				return clusterClient.Get(ctx, client.ObjectKeyFromObject(vmi), &kubevirtv1.VirtualMachineInstance{})
-			}).Should(Succeed())
-
-			// Call handleRestartRequest
-			result, err := reconciler.handleRestartRequest(ctx, ci)
+			// Call handleRestartRequest (pass k8sClient so checkRestartCompletion can read VMI)
+			result, err := reconciler.handleRestartRequest(ctx, ci, k8sClient)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 

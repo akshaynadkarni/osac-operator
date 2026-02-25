@@ -27,8 +27,8 @@ import (
 	"github.com/osac-project/osac-operator/api/v1alpha1"
 )
 
-// getTenant gets the tenant object from the cluster
-// If the tenant is not found, return nil and no error
+// getTenant gets the tenant object from the local cluster.
+// If the tenant is not found, return nil and no error.
 func (r *ComputeInstanceReconciler) getTenant(ctx context.Context, instance *v1alpha1.ComputeInstance) (*v1alpha1.Tenant, error) {
 	if instance.GetTenantReferenceName() == "" || instance.GetTenantReferenceNamespace() == "" {
 		// tenant reference is not set because it doesn't exist yet
@@ -44,7 +44,7 @@ func (r *ComputeInstanceReconciler) getTenant(ctx context.Context, instance *v1a
 	return tenant, nil
 }
 
-// createOrUpdateTenant creates or updates the tenant object in the cluster in the namespace where the compute instance lives
+// createOrUpdateTenant creates or updates the tenant object in the local cluster in the namespace where the compute instance lives.
 func (r *ComputeInstanceReconciler) createOrUpdateTenant(ctx context.Context, instance *v1alpha1.ComputeInstance) error {
 	tenantName, exists := instance.GetAnnotations()[osacTenantAnnotation]
 	if !exists || tenantName == "" {

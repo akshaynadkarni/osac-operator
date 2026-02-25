@@ -30,7 +30,7 @@ import (
 	"github.com/samber/lo"
 )
 
-func (r *TenantReconciler) createOrUpdateTenantNamespace(ctx context.Context, instance *v1alpha1.Tenant) error {
+func createOrUpdateTenantNamespace(ctx context.Context, targetClient client.Client, instance *v1alpha1.Tenant) error {
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   generateTenantNamespaceName(instance),
@@ -38,7 +38,7 @@ func (r *TenantReconciler) createOrUpdateTenantNamespace(ctx context.Context, in
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, namespace, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, targetClient, namespace, func() error {
 		ensureCommonLabelsForTenant(instance, namespace)
 		return nil
 	})
@@ -47,7 +47,7 @@ func (r *TenantReconciler) createOrUpdateTenantNamespace(ctx context.Context, in
 	return err
 }
 
-func (r *TenantReconciler) createOrUpdateTenantUDN(ctx context.Context, instance *v1alpha1.Tenant) error {
+func createOrUpdateTenantUDN(ctx context.Context, targetClient client.Client, instance *v1alpha1.Tenant) error {
 	namespaceName := instance.Status.Namespace
 	if namespaceName == "" {
 		return fmt.Errorf("namespace not yet created for tenant %s", instance.GetName())
@@ -73,7 +73,7 @@ func (r *TenantReconciler) createOrUpdateTenantUDN(ctx context.Context, instance
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, udn, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, targetClient, udn, func() error {
 		ensureCommonLabelsForTenant(instance, udn)
 		return nil
 	})
@@ -81,7 +81,7 @@ func (r *TenantReconciler) createOrUpdateTenantUDN(ctx context.Context, instance
 	return err
 }
 
-func (r *TenantReconciler) deleteTenantUDN(ctx context.Context, instance *v1alpha1.Tenant) (*ovnv1.UserDefinedNetwork, error) {
+func deleteTenantUDN(ctx context.Context, targetClient client.Client, instance *v1alpha1.Tenant) (*ovnv1.UserDefinedNetwork, error) {
 	namespaceName := instance.Status.Namespace
 	if namespaceName == "" {
 		// nothing to delete
@@ -89,15 +89,15 @@ func (r *TenantReconciler) deleteTenantUDN(ctx context.Context, instance *v1alph
 	}
 
 	udn := &ovnv1.UserDefinedNetwork{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: udnName, Namespace: namespaceName}, udn)
+	err := targetClient.Get(ctx, client.ObjectKey{Name: udnName, Namespace: namespaceName}, udn)
 	if err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
 
-	return udn, r.Client.Delete(ctx, udn)
+	return udn, targetClient.Delete(ctx, udn)
 }
 
-func (r *TenantReconciler) deleteTenantNamespace(ctx context.Context, instance *v1alpha1.Tenant) (*corev1.Namespace, error) {
+func deleteTenantNamespace(ctx context.Context, targetClient client.Client, instance *v1alpha1.Tenant) (*corev1.Namespace, error) {
 	namespaceName := instance.Status.Namespace
 	if namespaceName == "" {
 		// nothing to delete
@@ -105,13 +105,13 @@ func (r *TenantReconciler) deleteTenantNamespace(ctx context.Context, instance *
 	}
 
 	namespace := &corev1.Namespace{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: namespaceName}, namespace)
+	err := targetClient.Get(ctx, client.ObjectKey{Name: namespaceName}, namespace)
 	if err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
 
 	if namespace.Status.Phase != corev1.NamespaceTerminating {
-		err = r.Client.Delete(ctx, namespace)
+		err = targetClient.Delete(ctx, namespace)
 	}
 
 	return namespace, err

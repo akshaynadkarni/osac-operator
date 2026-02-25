@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	osacv1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac-operator/internal/provisioning"
@@ -162,14 +163,7 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 
 	BeforeEach(func() {
 		provider = newControllableProvider()
-		reconciler = &ComputeInstanceReconciler{
-			Client:                   k8sClient,
-			Scheme:                   k8sClient.Scheme(),
-			ComputeInstanceNamespace: testNamespace,
-			ProvisioningProvider:     provider,
-			StatusPollInterval:       100 * time.Millisecond,
-			MaxJobHistory:            DefaultMaxJobHistory,
-		}
+		reconciler = NewComputeInstanceReconciler(testMcManager, testNamespace, provider, 100*time.Millisecond, DefaultMaxJobHistory, mcmanager.LocalCluster)
 	})
 
 	Context("Provisioning workflow", func() {

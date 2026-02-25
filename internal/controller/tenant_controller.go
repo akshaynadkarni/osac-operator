@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 
 	ovnv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -26,14 +25,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
+	mchandler "sigs.k8s.io/multicluster-runtime/pkg/handler"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	"github.com/osac-project/osac-operator/api/v1alpha1"
 )
@@ -43,6 +43,8 @@ type TenantReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	tenantNamespace string
+	mgr             mcmanager.Manager
+	targetCluster   string
 }
 
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=tenants,verbs=get;list;watch;create;update;patch;delete
@@ -51,21 +53,23 @@ type TenantReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=k8s.ovn.org,resources=userdefinednetworks,verbs=get;list;watch;create;update;patch;delete
 
-func NewTenantReconciler(client client.Client, scheme *runtime.Scheme, tenantNamespace string) *TenantReconciler {
+func NewTenantReconciler(mgr mcmanager.Manager, tenantNamespace string, targetCluster string) *TenantReconciler {
 	return &TenantReconciler{
-		Client:          client,
-		Scheme:          scheme,
+		Client:          mgr.GetLocalManager().GetClient(),
+		Scheme:          mgr.GetLocalManager().GetScheme(),
 		tenantNamespace: tenantNamespace,
+		mgr:             mgr,
+		targetCluster:   targetCluster,
 	}
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *TenantReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+func (r *TenantReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
 	instance := &v1alpha1.Tenant{}
-	err := r.Client.Get(ctx, req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -76,9 +80,9 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 
 	var res ctrl.Result
 	if instance.ObjectMeta.DeletionTimestamp.IsZero() {
-		res, err = r.handleUpdate(ctx, req, instance)
+		res, err = r.handleUpdate(ctx, req.Request, instance)
 	} else {
-		res, err = r.handleDelete(ctx, req, instance)
+		res, err = r.handleDelete(ctx, req.Request, instance)
 	}
 
 	if !equality.Semantic.DeepEqual(instance.Status, *oldstatus) {
@@ -110,14 +114,20 @@ func (r *TenantReconciler) handleUpdate(ctx context.Context, req reconcile.Reque
 	// Set phase to Progressing
 	instance.Status.Phase = v1alpha1.TenantPhaseProgressing
 
+	// Get target cluster client where namespace and UDN are reconciled
+	targetClient, err := r.getTargetClient(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Create namespace
-	if err := r.createOrUpdateTenantNamespace(ctx, instance); err != nil {
+	if err := createOrUpdateTenantNamespace(ctx, targetClient, instance); err != nil {
 		instance.Status.Phase = v1alpha1.TenantPhaseFailed
 		return ctrl.Result{}, err
 	}
 
 	// Create UDN
-	if err := r.createOrUpdateTenantUDN(ctx, instance); err != nil {
+	if err := createOrUpdateTenantUDN(ctx, targetClient, instance); err != nil {
 		instance.Status.Phase = v1alpha1.TenantPhaseFailed
 		return ctrl.Result{}, err
 	}
@@ -140,14 +150,20 @@ func (r *TenantReconciler) handleDelete(ctx context.Context, req reconcile.Reque
 		return ctrl.Result{}, nil
 	}
 
+	// Get target cluster client where namespace and UDN are deleted
+	targetClient, err := r.getTargetClient(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Delete UDN first
-	udn, err := r.deleteTenantUDN(ctx, instance)
+	udn, err := deleteTenantUDN(ctx, targetClient, instance)
 	if err != nil || udn != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Delete namespace
-	ns, err := r.deleteTenantNamespace(ctx, instance)
+	ns, err := deleteTenantNamespace(ctx, targetClient, instance)
 	if err != nil || ns != nil {
 		return ctrl.Result{}, err
 	}
@@ -198,23 +214,22 @@ func (r *TenantReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 		return err
 	}
 
-	localMgr := mgr.GetLocalManager()
-	if localMgr == nil {
-		return fmt.Errorf("local manager is nil")
-	}
-
-	return ctrl.NewControllerManagedBy(localMgr).
-		For(&v1alpha1.Tenant{}, builder.WithPredicates(tenantNamespacePredicate(r.tenantNamespace))).
+	// Tenant CR is reconciled from local cluster only
+	return mcbuilder.ControllerManagedBy(mgr).
+		For(&v1alpha1.Tenant{},
+			mcbuilder.WithPredicates(tenantNamespacePredicate(r.tenantNamespace)),
+			mcbuilder.WithEngageWithLocalCluster(true),
+			mcbuilder.WithEngageWithProviderClusters(false)).
 		Named("tenant").
 		Watches(
 			&corev1.Namespace{},
-			handler.EnqueueRequestsFromMapFunc(r.mapObjectToTenant),
-			builder.WithPredicates(tenantLabelPredicate),
+			mchandler.EnqueueRequestsFromMapFunc(r.mapObjectToTenant),
+			mcbuilder.WithPredicates(tenantLabelPredicate),
 		).
 		Watches(
 			&ovnv1.UserDefinedNetwork{},
-			handler.EnqueueRequestsFromMapFunc(r.mapObjectToTenant),
-			builder.WithPredicates(tenantLabelPredicate),
+			mchandler.EnqueueRequestsFromMapFunc(r.mapObjectToTenant),
+			mcbuilder.WithPredicates(tenantLabelPredicate),
 		).
 		Complete(r)
 }
@@ -243,4 +258,12 @@ func tenantLabelSelector(project string) metav1.LabelSelector {
 			},
 		},
 	}
+}
+
+func (r *TenantReconciler) getTargetClient(ctx context.Context) (client.Client, error) {
+	targetCluster, err := r.mgr.GetCluster(ctx, r.targetCluster)
+	if err != nil {
+		return nil, err
+	}
+	return targetCluster.GetClient(), nil
 }

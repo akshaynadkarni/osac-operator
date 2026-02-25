@@ -31,14 +31,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
+	mchandler "sigs.k8s.io/multicluster-runtime/pkg/handler"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	"github.com/osac-project/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac-operator/internal/provisioning"
@@ -54,21 +55,23 @@ const (
 type ComputeInstanceReconciler struct {
 	client.Client
 	Scheme                   *runtime.Scheme
+	mgr                      mcmanager.Manager
 	ComputeInstanceNamespace string
 	ProvisioningProvider     provisioning.ProvisioningProvider
 	// StatusPollInterval defines how often to check provisioning job status
 	StatusPollInterval time.Duration
 	// MaxJobHistory defines how many jobs to keep in status.jobs array
 	MaxJobHistory int
+	targetCluster string
 }
 
 func NewComputeInstanceReconciler(
-	client client.Client,
-	scheme *runtime.Scheme,
+	mgr mcmanager.Manager,
 	computeInstanceNamespace string,
 	provisioningProvider provisioning.ProvisioningProvider,
 	statusPollInterval time.Duration,
 	maxJobHistory int,
+	targetCluster string,
 ) *ComputeInstanceReconciler {
 
 	if computeInstanceNamespace == "" {
@@ -84,12 +87,14 @@ func NewComputeInstanceReconciler(
 	}
 
 	return &ComputeInstanceReconciler{
-		Client:                   client,
-		Scheme:                   scheme,
+		Client:                   mgr.GetLocalManager().GetClient(),
+		Scheme:                   mgr.GetLocalManager().GetScheme(),
+		mgr:                      mgr,
 		ComputeInstanceNamespace: computeInstanceNamespace,
 		ProvisioningProvider:     provisioningProvider,
 		StatusPollInterval:       statusPollInterval,
 		MaxJobHistory:            maxJobHistory,
+		targetCluster:            targetCluster,
 	}
 }
 
@@ -131,15 +136,15 @@ func updateJob(jobs []v1alpha1.JobStatus, updatedJob v1alpha1.JobStatus) bool {
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=kubevirt.io,resources=computeinstances,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines;virtualmachineinstances,verbs=get;list;watch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *ComputeInstanceReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+func (r *ComputeInstanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 
 	instance := &v1alpha1.ComputeInstance{}
-	err := r.Client.Get(ctx, req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -156,9 +161,9 @@ func (r *ComputeInstanceReconciler) Reconcile(ctx context.Context, req reconcile
 
 	var res ctrl.Result
 	if instance.ObjectMeta.DeletionTimestamp.IsZero() {
-		res, err = r.handleUpdate(ctx, req, instance)
+		res, err = r.handleUpdate(ctx, req.Request, instance)
 	} else {
-		res, err = r.handleDelete(ctx, req, instance)
+		res, err = r.handleDelete(ctx, req.Request, instance)
 	}
 
 	if !equality.Semantic.DeepEqual(instance.Status, *oldstatus) {
@@ -196,6 +201,15 @@ func ComputeInstanceNamespacePredicate(namespace string) predicate.Predicate {
 	)
 }
 
+// getTargetClient returns the client for the target cluster where VirtualMachine/VMI are managed.
+func (r *ComputeInstanceReconciler) getTargetClient(ctx context.Context) (client.Client, error) {
+	targetCluster, err := r.mgr.GetCluster(ctx, r.targetCluster)
+	if err != nil {
+		return nil, err
+	}
+	return targetCluster.GetClient(), nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ComputeInstanceReconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	labelPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
@@ -210,22 +224,24 @@ func (r *ComputeInstanceReconciler) SetupWithManager(mgr mcmanager.Manager) erro
 		return err
 	}
 
-	localMgr := mgr.GetLocalManager()
-	if localMgr == nil {
-		return fmt.Errorf("local manager is nil")
-	}
-
-	return ctrl.NewControllerManagedBy(localMgr).
-		For(&v1alpha1.ComputeInstance{}, builder.WithPredicates(ComputeInstanceNamespacePredicate(r.ComputeInstanceNamespace))).
+	return mcbuilder.ControllerManagedBy(mgr).
+		For(&v1alpha1.ComputeInstance{},
+			mcbuilder.WithPredicates(ComputeInstanceNamespacePredicate(r.ComputeInstanceNamespace)),
+			mcbuilder.WithEngageWithLocalCluster(true),
+			mcbuilder.WithEngageWithProviderClusters(false)).
 		Watches(
 			&kubevirtv1.VirtualMachine{},
-			handler.EnqueueRequestsFromMapFunc(r.mapObjectToComputeInstance),
-			builder.WithPredicates(labelPredicate),
+			mchandler.EnqueueRequestsFromMapFunc(r.mapObjectToComputeInstance),
+			mcbuilder.WithPredicates(labelPredicate),
 		).
 		Watches(
 			&v1alpha1.Tenant{},
-			handler.EnqueueRequestForOwner(r.Scheme, localMgr.GetRESTMapper(), &v1alpha1.ComputeInstance{}, handler.OnlyControllerOwner()),
-			builder.WithPredicates(ComputeInstanceNamespacePredicate(r.ComputeInstanceNamespace)),
+			mchandler.EnqueueRequestForOwner(
+				&v1alpha1.ComputeInstance{},
+			),
+			mcbuilder.WithPredicates(ComputeInstanceNamespacePredicate(r.ComputeInstanceNamespace)),
+			mcbuilder.WithEngageWithLocalCluster(true),
+			mcbuilder.WithEngageWithProviderClusters(false),
 		).
 		Complete(r)
 }
@@ -520,6 +536,12 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 		if err := r.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Re-fetch so we have the latest resourceVersion and status; Update() may not
+		// return the full status (status subresource is separate), and we need the
+		// latest version to avoid 409 conflicts on later status updates.
+		if err := r.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Initialize status after the finalizer update, because r.Update() overwrites
@@ -532,7 +554,7 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
 	}
 
-	// Get the tenant
+	// Get the tenant (on local cluster)
 	tenant, err := r.getTenant(ctx, instance)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -562,7 +584,12 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	kv, err := r.findKubeVirtVMs(ctx, instance, tenant.Status.Namespace)
+	targetClient, err := r.getTargetClient(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	kv, err := r.findKubeVirtVMs(ctx, targetClient, instance, tenant.Status.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -573,8 +600,8 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 		}
 	}
 
-	// Handle restart request
-	if result, err := r.handleRestartRequest(ctx, instance); err != nil || result.RequeueAfter > 0 {
+	// Handle restart request (VMI is on target cluster)
+	if result, err := r.handleRestartRequest(ctx, instance, targetClient); err != nil || (result.RequeueAfter > 0) {
 		return result, err
 	}
 
@@ -638,7 +665,7 @@ func (r *ComputeInstanceReconciler) handleDelete(ctx context.Context, _ reconcil
 
 	// Deprovisioning complete or skipped, remove base finalizer
 	if controllerutil.RemoveFinalizer(instance, osacComputeInstanceFinalizer) {
-		if err := r.Update(ctx, instance); err != nil {
+		if err := r.mgr.GetLocalManager().GetClient().Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -675,11 +702,11 @@ func (r *ComputeInstanceReconciler) initializeStatusCondition(instance *v1alpha1
 	instance.SetStatusCondition(conditionType, status, "", reason)
 }
 
-func (r *ComputeInstanceReconciler) findKubeVirtVMs(ctx context.Context, instance *v1alpha1.ComputeInstance, nsName string) (*kubevirtv1.VirtualMachine, error) {
+func (r *ComputeInstanceReconciler) findKubeVirtVMs(ctx context.Context, targetClient client.Client, instance *v1alpha1.ComputeInstance, nsName string) (*kubevirtv1.VirtualMachine, error) {
 	log := ctrllog.FromContext(ctx)
 
 	var kubeVirtVMList kubevirtv1.VirtualMachineList
-	if err := r.List(ctx, &kubeVirtVMList, client.InNamespace(nsName), labelSelectorFromComputeInstanceInstance(instance)); err != nil {
+	if err := targetClient.List(ctx, &kubeVirtVMList, client.InNamespace(nsName), labelSelectorFromComputeInstanceInstance(instance)); err != nil {
 		log.Error(err, "failed to list KubeVirt VMs")
 		return nil, err
 	}
