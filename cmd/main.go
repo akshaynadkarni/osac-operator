@@ -270,8 +270,11 @@ func createProvider(
 	}
 }
 
-// setupClusterControllers registers the ClusterOrder controller and, when grpcConn is set, the cluster Feedback controller.
-func setupClusterControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn, minimumRequestInterval time.Duration) error {
+// setupClusterControllers registers the ClusterOrder controller and, when grpcConn is set,
+// the cluster Feedback controller.
+func setupClusterControllers(
+	mgr mcmanager.Manager, grpcConn *grpc.ClientConn, minimumRequestInterval time.Duration,
+) error {
 	localMgr := mgr.GetLocalManager()
 	if grpcConn != nil {
 		if err := (controller.NewFeedbackReconciler(
@@ -296,8 +299,11 @@ func setupClusterControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn, m
 	return nil
 }
 
-// setupHostPoolControllers registers the HostPool controller and, when grpcConn is set, the HostPool Feedback controller.
-func setupHostPoolControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn, minimumRequestInterval time.Duration) error {
+// setupHostPoolControllers registers the HostPool controller and, when grpcConn is set,
+// the HostPool Feedback controller.
+func setupHostPoolControllers(
+	mgr mcmanager.Manager, grpcConn *grpc.ClientConn, minimumRequestInterval time.Duration,
+) error {
 	localMgr := mgr.GetLocalManager()
 	if grpcConn != nil {
 		if err := (controller.NewHostPoolFeedbackReconciler(
@@ -322,7 +328,8 @@ func setupHostPoolControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn, 
 	return nil
 }
 
-// setupComputeInstanceControllers registers the ComputeInstance controller and, when grpcConn is set, the ComputeInstance Feedback controller.
+// setupComputeInstanceControllers registers the ComputeInstance controller and, when grpcConn is set,
+// the ComputeInstance Feedback controller.
 func setupComputeInstanceControllers(
 	mgr mcmanager.Manager,
 	grpcConn *grpc.ClientConn,
@@ -479,8 +486,14 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	if !enableTenantController && !enableHostPoolController && !enableComputeInstanceController && !enableClusterController {
-		enableTenantController, enableHostPoolController, enableComputeInstanceController, enableClusterController = true, true, true, true
+	if !enableTenantController &&
+		!enableHostPoolController &&
+		!enableComputeInstanceController &&
+		!enableClusterController {
+		enableTenantController = true
+		enableHostPoolController = true
+		enableComputeInstanceController = true
+		enableClusterController = true
 		setupLog.Info("no controller flags set, enabling all controllers")
 	}
 
@@ -651,7 +664,11 @@ func main() {
 	}
 	if remoteProvider != nil {
 		setupLog.Info("starting remote provider")
-		go remoteProvider.(multicluster.ProviderRunnable).Start(ctx, mgr)
+		go func() {
+			if err := remoteProvider.(multicluster.ProviderRunnable).Start(ctx, mgr); err != nil {
+				setupLog.Error(err, "remote provider failed")
+			}
+		}()
 	}
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
