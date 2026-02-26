@@ -24,8 +24,8 @@ managed:
 
 inputs:
 
-- module: buf.build/innabox/fulfillment-api:v0.0.31
-- module: buf.build/innabox/private-api:v0.0.40
+- module: buf.build/innabox/fulfillment-api:v0.0.32
+- module: buf.build/innabox/private-api:v0.0.41
 
 plugins:
 

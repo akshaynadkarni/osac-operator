@@ -165,11 +165,9 @@ const (
 type ComputeInstanceConditionType string
 
 const (
-	// ComputeInstanceConditionAccepted means the order has been accepted but work has not yet started
-	ComputeInstanceConditionAccepted ComputeInstanceConditionType = "Accepted"
-
-	// ComputeInstanceConditionProgressing means that an update is in progress
-	ComputeInstanceConditionProgressing ComputeInstanceConditionType = "Progressing"
+	// ComputeInstanceConditionConfigurationApplied means the current spec configuration has been applied.
+	// True when desiredConfigVersion == reconciledConfigVersion, False while configuration is being applied.
+	ComputeInstanceConditionConfigurationApplied ComputeInstanceConditionType = "ConfigurationApplied"
 
 	// ComputeInstanceConditionAvailable means the compute instance is available
 	ComputeInstanceConditionAvailable ComputeInstanceConditionType = "Available"
