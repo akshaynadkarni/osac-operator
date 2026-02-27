@@ -41,13 +41,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	cluster "sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
+	"sigs.k8s.io/multicluster-runtime/providers/single"
 
 	v1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac-operator/internal/aap"
@@ -58,12 +64,12 @@ import (
 )
 
 var (
-	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
 
 const (
 	// EDA webhook environment variables
+	envComputeInstanceNamespace          = "OSAC_COMPUTE_INSTANCE_NAMESPACE"
 	envComputeInstanceProvisionWebhook   = "OSAC_COMPUTE_INSTANCE_PROVISION_WEBHOOK"
 	envComputeInstanceDeprovisionWebhook = "OSAC_COMPUTE_INSTANCE_DEPROVISION_WEBHOOK"
 
@@ -79,6 +85,20 @@ const (
 
 	// Job history configuration
 	envMaxJobHistory = "OSAC_MAX_JOB_HISTORY"
+
+	// Tenant configuration
+	envTenantNamespace = "OSAC_TENANT_NAMESPACE"
+
+	// Remote cluster (tenant and compute-instance controllers)
+	envRemoteClusterKubeconfig = "OSAC_REMOTE_CLUSTER_KUBECONFIG"
+
+	// Controller enable flags (defaults when flag is not set)
+	envEnableTenantController          = "OSAC_ENABLE_TENANT_CONTROLLER"
+	envEnableHostPoolController        = "OSAC_ENABLE_HOST_POOL_CONTROLLER"
+	envEnableComputeInstanceController = "OSAC_ENABLE_COMPUTE_INSTANCE_CONTROLLER"
+	envEnableClusterController         = "OSAC_ENABLE_CLUSTER_CONTROLLER"
+
+	remoteClusterName = "remote"
 )
 
 // parsePollInterval parses a poll interval from environment variable with fallback to default.
@@ -121,13 +141,61 @@ func parseIntEnv(envVar string, defaultValue int) int {
 	return value
 }
 
-func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
-	utilruntime.Must(hypershiftv1beta1.AddToScheme(scheme))
-	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
-	utilruntime.Must(ovnv1.AddToScheme(scheme))
+// addSchemesForLocalControllers registers only the API schemes required by the enabled controllers.
+// Must be called before creating the manager.
+func addSchemesForLocalControllers(
+	localScheme *runtime.Scheme,
+	enableCluster, enableHostPool, enableComputeInstance, enableTenant bool,
+) {
+	utilruntime.Must(clientgoscheme.AddToScheme(localScheme))
+	utilruntime.Must(v1alpha1.AddToScheme(localScheme))
+	if enableCluster {
+		utilruntime.Must(hypershiftv1beta1.AddToScheme(localScheme))
+	}
+	if enableComputeInstance {
+		utilruntime.Must(kubevirtv1.AddToScheme(localScheme))
+	}
+	if enableTenant {
+		utilruntime.Must(ovnv1.AddToScheme(localScheme))
+	}
 	// +kubebuilder:scaffold:scheme
+}
+
+// addSchemesForRemoteControllers registers only the API schemes required by the enabled controllers.
+// Must be called before creating the manager.
+func addSchemesForRemoteControllers(
+	localScheme *runtime.Scheme,
+	remoteScheme *runtime.Scheme,
+	enableComputeInstance, enableTenant bool,
+) {
+	utilruntime.Must(clientgoscheme.AddToScheme(localScheme))
+	utilruntime.Must(v1alpha1.AddToScheme(localScheme))
+
+	utilruntime.Must(clientgoscheme.AddToScheme(remoteScheme))
+	if enableComputeInstance {
+		utilruntime.Must(kubevirtv1.AddToScheme(remoteScheme))
+	}
+	if enableTenant {
+		utilruntime.Must(ovnv1.AddToScheme(remoteScheme))
+	}
+	// +kubebuilder:scaffold:scheme
+}
+
+// newClusterFromKubeconfig creates a controller-runtime cluster from a kubeconfig file path.
+// The cluster uses the given scheme for type resolution. The caller is responsible for
+// starting the cluster (e.g. in a goroutine with cl.Start(ctx)) so it runs with the manager.
+func newClusterFromKubeconfig(kubeconfigPath string, scheme *runtime.Scheme) (cluster.Cluster, error) {
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("build config from kubeconfig %q: %w", kubeconfigPath, err)
+	}
+	cl, err := cluster.New(config, func(o *cluster.Options) {
+		o.Scheme = scheme
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create cluster from kubeconfig: %w", err)
+	}
+	return cl, nil
 }
 
 // createEDAProvider creates and validates EDA webhook provider configuration.
@@ -202,7 +270,141 @@ func createProvider(
 	}
 }
 
+// setupClusterControllers registers the ClusterOrder controller and, when grpcConn is set,
+// the cluster Feedback controller.
+func setupClusterControllers(
+	mgr mcmanager.Manager, grpcConn *grpc.ClientConn, minimumRequestInterval time.Duration,
+) error {
+	localMgr := mgr.GetLocalManager()
+	if grpcConn != nil {
+		if err := (controller.NewFeedbackReconciler(
+			ctrl.Log.WithName("feedback"),
+			localMgr.GetClient(),
+			grpcConn,
+			os.Getenv("OSAC_CLUSTER_ORDER_NAMESPACE"),
+		)).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("feedback controller: %w", err)
+		}
+	}
+	if err := (controller.NewClusterOrderReconciler(
+		localMgr.GetClient(),
+		localMgr.GetScheme(),
+		os.Getenv("OSAC_CLUSTER_CREATE_WEBHOOK"),
+		os.Getenv("OSAC_CLUSTER_DELETE_WEBHOOK"),
+		os.Getenv("OSAC_CLUSTER_ORDER_NAMESPACE"),
+		minimumRequestInterval,
+	)).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("cluster order controller: %w", err)
+	}
+	return nil
+}
+
+// setupHostPoolControllers registers the HostPool controller and, when grpcConn is set,
+// the HostPool Feedback controller.
+func setupHostPoolControllers(
+	mgr mcmanager.Manager, grpcConn *grpc.ClientConn, minimumRequestInterval time.Duration,
+) error {
+	localMgr := mgr.GetLocalManager()
+	if grpcConn != nil {
+		if err := (controller.NewHostPoolFeedbackReconciler(
+			ctrl.Log.WithName("feedback"),
+			localMgr.GetClient(),
+			grpcConn,
+			os.Getenv("OSAC_HOSTPOOL_ORDER_NAMESPACE"),
+		)).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("hostpool feedback controller: %w", err)
+		}
+	}
+	if err := (controller.NewHostPoolReconciler(
+		localMgr.GetClient(),
+		localMgr.GetScheme(),
+		os.Getenv("OSAC_HOSTPOOL_CREATE_WEBHOOK"),
+		os.Getenv("OSAC_HOSTPOOL_DELETE_WEBHOOK"),
+		os.Getenv("OSAC_HOSTPOOL_ORDER_NAMESPACE"),
+		minimumRequestInterval,
+	)).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("hostpool controller: %w", err)
+	}
+	return nil
+}
+
+// setupComputeInstanceControllers registers the ComputeInstance controller and, when grpcConn is set,
+// the ComputeInstance Feedback controller.
+func setupComputeInstanceControllers(
+	mgr mcmanager.Manager,
+	grpcConn *grpc.ClientConn,
+	minimumRequestInterval time.Duration,
+	maxJobHistory int,
+) error {
+	localMgr := mgr.GetLocalManager()
+	computeInstanceNamespace := os.Getenv(envComputeInstanceNamespace)
+	targetCluster := mcmanager.LocalCluster
+	if mgr.GetProvider() != nil {
+		targetCluster = remoteClusterName
+	}
+	providerTypeStr := os.Getenv(envProvisioningProvider)
+	provisionWebhook := os.Getenv(envComputeInstanceProvisionWebhook)
+	deprovisionWebhook := os.Getenv(envComputeInstanceDeprovisionWebhook)
+	aapURL := os.Getenv(envAAPURL)
+	aapToken := os.Getenv(envAAPToken)
+	provisionTemplate := os.Getenv(envAAPProvisionTemplate)
+	deprovisionTemplate := os.Getenv(envAAPDeprovisionTemplate)
+	providerType := provisioning.ProviderType(providerTypeStr)
+	if providerType == "" {
+		providerType = provisioning.ProviderTypeEDA
+	}
+	computeInstanceProvider, statusPollInterval, err := createProvider(
+		providerType,
+		provisionWebhook, deprovisionWebhook,
+		aapURL, aapToken, provisionTemplate, deprovisionTemplate,
+		minimumRequestInterval,
+	)
+	if err != nil {
+		return fmt.Errorf("create provisioning provider: %w", err)
+	}
+	if grpcConn != nil {
+		if err := (controller.NewComputeInstanceFeedbackReconciler(
+			localMgr.GetClient(),
+			grpcConn,
+			computeInstanceNamespace,
+		)).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("computeinstance feedback controller: %w", err)
+		}
+	}
+	if err := (controller.NewComputeInstanceReconciler(
+		mgr,
+		computeInstanceNamespace,
+		computeInstanceProvider,
+		statusPollInterval,
+		maxJobHistory,
+		targetCluster,
+	)).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("computeinstance controller: %w", err)
+	}
+	return nil
+}
+
+// setupTenantController registers the Tenant controller.
+func setupTenantController(mgr mcmanager.Manager) error {
+	targetCluster := mcmanager.LocalCluster
+	if mgr.GetProvider() != nil {
+		targetCluster = remoteClusterName
+	}
+
+	tenantNamespace := os.Getenv(envTenantNamespace)
+	if err := (controller.NewTenantReconciler(
+		mgr,
+		tenantNamespace,
+		targetCluster,
+	)).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("tenant controller: %w", err)
+	}
+	return nil
+}
+
 func main() {
+	var err error
+
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
@@ -212,6 +414,7 @@ func main() {
 	var grpcInsecure bool
 	var grpcTokenFile string
 	var fulfillmentServerAddress string
+	var remoteClusterKubeconfig string
 	var minimumRequestInterval time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -253,11 +456,51 @@ func main() {
 		helpers.GetEnvWithDefault("OSAC_MINIMUM_REQUEST_INTERVAL", time.Duration(0)),
 		"Minimum amount of time between calls to the same webook url",
 	)
+	flag.StringVar(
+		&remoteClusterKubeconfig,
+		"remote-cluster-kubeconfig",
+		os.Getenv(envRemoteClusterKubeconfig),
+		"Path to the kubeconfig for the remote cluster (supported by tenant and compute-instance controllers only).",
+	)
+
+	// Controller enable flags. Defaults from env; if none are set (flag or env), all controllers are enabled.
+	var enableTenantController bool
+	var enableHostPoolController bool
+	var enableComputeInstanceController bool
+	var enableClusterController bool
+	flag.BoolVar(&enableTenantController, "enable-tenant-controller",
+		helpers.GetEnvWithDefault(envEnableTenantController, false),
+		"Enable the tenant controller.")
+	flag.BoolVar(&enableHostPoolController, "enable-host-pool-controller",
+		helpers.GetEnvWithDefault(envEnableHostPoolController, false),
+		"Enable the host-pool controller.")
+	flag.BoolVar(&enableComputeInstanceController, "enable-compute-instance-controller",
+		helpers.GetEnvWithDefault(envEnableComputeInstanceController, false),
+		"Enable the compute-instance controller.")
+	flag.BoolVar(&enableClusterController, "enable-cluster-controller",
+		helpers.GetEnvWithDefault(envEnableClusterController, false),
+		"Enable the cluster controller.")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if !enableTenantController &&
+		!enableHostPoolController &&
+		!enableComputeInstanceController &&
+		!enableClusterController {
+		enableTenantController = true
+		enableHostPoolController = true
+		enableComputeInstanceController = true
+		enableClusterController = true
+		setupLog.Info("no controller flags set, enabling all controllers")
+	}
+
+	if remoteClusterKubeconfig != "" && (enableHostPoolController || enableClusterController) {
+		setupLog.Error(nil, "remote cluster kubeconfig option is not supported along with host-pool and cluster controllers")
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -304,8 +547,35 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+	// Add the schemes depending if controllers reconcile locally or remotely
+	localScheme := runtime.NewScheme()
+	var remoteScheme *runtime.Scheme
+	var remoteProvider multicluster.Provider
+	var remoteCluster cluster.Cluster
+	if remoteClusterKubeconfig == "" {
+		localScheme = runtime.NewScheme()
+		addSchemesForLocalControllers(localScheme,
+			enableClusterController,
+			enableHostPoolController,
+			enableComputeInstanceController,
+			enableTenantController,
+		)
+	} else {
+		remoteScheme = runtime.NewScheme()
+		addSchemesForRemoteControllers(localScheme, remoteScheme,
+			enableComputeInstanceController,
+			enableTenantController,
+		)
+		remoteCluster, err = newClusterFromKubeconfig(remoteClusterKubeconfig, remoteScheme)
+		if err != nil {
+			setupLog.Error(err, "unable to create remote cluster from kubeconfig")
+			os.Exit(1)
+		}
+		remoteProvider = single.New(remoteClusterName, remoteCluster)
+	}
+
+	mgr, err := mcmanager.New(ctrl.GetConfigOrDie(), remoteProvider, manager.Options{
+		Scheme:                 localScheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -328,9 +598,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	computeInstanceNamespace := os.Getenv("OSAC_COMPUTE_INSTANCE_NAMESPACE")
-
-	// Create the gRPC connection:
 	var grpcConn *grpc.ClientConn
 	if fulfillmentServerAddress != "" {
 		setupLog.Info("gRPC connection to fulfillment service is enabled")
@@ -340,126 +607,36 @@ func main() {
 			os.Exit(1)
 		}
 		defer grpcConn.Close() //nolint:errcheck
-		if err = (controller.NewFeedbackReconciler(
-			ctrl.Log.WithName("feedback"),
-			mgr.GetClient(),
-			grpcConn,
-			os.Getenv("OSAC_CLUSTER_ORDER_NAMESPACE"),
-		)).SetupWithManager(mgr); err != nil {
-			setupLog.Error(
-				err,
-				"unable to create feedback controller",
-				"controller", "Feedback",
-			)
-			os.Exit(1)
-		}
-
-		// Create the HostPool feedback reconciler:
-		if err = (controller.NewHostPoolFeedbackReconciler(
-			ctrl.Log.WithName("feedback"),
-			mgr.GetClient(),
-			grpcConn,
-			os.Getenv("OSAC_HOSTPOOL_ORDER_NAMESPACE"),
-		)).SetupWithManager(mgr); err != nil {
-			setupLog.Error(
-				err,
-				"unable to create hostpool feedback controller",
-				"controller", "Feedback",
-			)
-			os.Exit(1)
-		}
-
-		// Create the ComputeInstance feedback reconciler:
-		if err = (controller.NewComputeInstanceFeedbackReconciler(
-			mgr.GetClient(),
-			grpcConn,
-			computeInstanceNamespace,
-		)).SetupWithManager(mgr); err != nil {
-			setupLog.Error(
-				err,
-				"unable to create computeinstance feedback controller",
-				"controller", "ComputeInstanceFeedback",
-			)
-			os.Exit(1)
-		}
 	} else {
 		setupLog.Info("gRPC connection to fulfillment service is disabled")
 	}
 
-	if err = (controller.NewClusterOrderReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		os.Getenv("OSAC_CLUSTER_CREATE_WEBHOOK"),
-		os.Getenv("OSAC_CLUSTER_DELETE_WEBHOOK"),
-		os.Getenv("OSAC_CLUSTER_ORDER_NAMESPACE"),
-		minimumRequestInterval,
-	)).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ClusterOrder")
-		os.Exit(1)
-	}
-
-	if err = (controller.NewHostPoolReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		os.Getenv("OSAC_HOSTPOOL_CREATE_WEBHOOK"),
-		os.Getenv("OSAC_HOSTPOOL_DELETE_WEBHOOK"),
-		os.Getenv("OSAC_HOSTPOOL_ORDER_NAMESPACE"),
-		minimumRequestInterval,
-	)).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "HostPool")
-		os.Exit(1)
-	}
-
-	// Create the ComputeInstance reconciler with appropriate provider
-	// Read all configuration upfront
-	providerTypeStr := os.Getenv(envProvisioningProvider)
-	provisionWebhook := os.Getenv(envComputeInstanceProvisionWebhook)
-	deprovisionWebhook := os.Getenv(envComputeInstanceDeprovisionWebhook)
-	aapURL := os.Getenv(envAAPURL)
-	aapToken := os.Getenv(envAAPToken)
-	provisionTemplate := os.Getenv(envAAPProvisionTemplate)
-	deprovisionTemplate := os.Getenv(envAAPDeprovisionTemplate)
-
-	// Default to EDA if not specified (backward compatibility)
-	providerType := provisioning.ProviderType(providerTypeStr)
-	if providerType == "" {
-		providerType = provisioning.ProviderTypeEDA
-	}
-
-	computeInstanceProvider, statusPollInterval, err := createProvider(
-		providerType,
-		provisionWebhook, deprovisionWebhook,
-		aapURL, aapToken, provisionTemplate, deprovisionTemplate,
-		minimumRequestInterval,
-	)
-	if err != nil {
-		setupLog.Error(err, "failed to create provisioning provider")
-		os.Exit(1)
-	}
-
-	// Parse max job history
 	maxJobHistory := parseIntEnv(envMaxJobHistory, controller.DefaultMaxJobHistory)
 	setupLog.Info("job history configuration", "maxJobs", maxJobHistory)
 
-	if err = (controller.NewComputeInstanceReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		computeInstanceNamespace,
-		computeInstanceProvider,
-		statusPollInterval,
-		maxJobHistory,
-	)).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ComputeInstance")
-		os.Exit(1)
+	if enableClusterController {
+		if err := setupClusterControllers(mgr, grpcConn, minimumRequestInterval); err != nil {
+			setupLog.Error(err, "unable to setup cluster controllers")
+			os.Exit(1)
+		}
 	}
-	// Tenant reconciler in ComputeInstance namespace
-	if err := (controller.NewTenantReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		computeInstanceNamespace,
-	)).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Tenant", "namespace", computeInstanceNamespace)
-		os.Exit(1)
+	if enableHostPoolController {
+		if err := setupHostPoolControllers(mgr, grpcConn, minimumRequestInterval); err != nil {
+			setupLog.Error(err, "unable to setup hostpool controllers")
+			os.Exit(1)
+		}
+	}
+	if enableComputeInstanceController {
+		if err := setupComputeInstanceControllers(mgr, grpcConn, minimumRequestInterval, maxJobHistory); err != nil {
+			setupLog.Error(err, "unable to setup computeinstance controllers")
+			os.Exit(1)
+		}
+	}
+	if enableTenantController {
+		if err := setupTenantController(mgr); err != nil {
+			setupLog.Error(err, "unable to setup tenant controller")
+			os.Exit(1)
+		}
 	}
 
 	// +kubebuilder:scaffold:builder
@@ -473,8 +650,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+
+	if remoteCluster != nil {
+		setupLog.Info("starting remote cluster")
+		go func() {
+			err := remoteCluster.Start(ctx)
+			if err != nil {
+				setupLog.Error(err, "unable to start remote cluster")
+				os.Exit(1)
+			}
+		}()
+	}
+	if remoteProvider != nil {
+		setupLog.Info("starting remote provider")
+		go func() {
+			if err := remoteProvider.(multicluster.ProviderRunnable).Start(ctx, mgr); err != nil {
+				setupLog.Error(err, "remote provider failed")
+			}
+		}()
+	}
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
