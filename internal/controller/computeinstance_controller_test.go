@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
@@ -306,6 +307,41 @@ var _ = Describe("ComputeInstance Controller", func() {
 
 			// Versions should be identical
 			Expect(vm1.Status.DesiredConfigVersion).To(Equal(vm2.Status.DesiredConfigVersion))
+		})
+	})
+
+	Context("getFirstVMIIPAddress", func() {
+		var reconciler *ComputeInstanceReconciler
+		ctx := context.Background()
+
+		BeforeEach(func() {
+			reconciler = NewComputeInstanceReconciler(testMcManager, "", "", &mockProvisioningProvider{}, 0, 0, mcmanager.LocalCluster)
+		})
+
+		It("returns the first interface IP from the VMI status", func() {
+			const wantIP = "10.0.0.42"
+			vmi := &kubevirtv1.VirtualMachineInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmi-ip",
+					Namespace: "default",
+				},
+				Status: kubevirtv1.VirtualMachineInstanceStatus{
+					Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+						{IP: wantIP, Name: "default"},
+						{IP: "10.0.0.43", Name: "ignored"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, vmi)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, vmi)
+			})
+
+			targetClient, err := reconciler.getTargetClient(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			ip := reconciler.getFirstVMIIPAddress(ctx, targetClient, vmi.Namespace, vmi.Name)
+			Expect(ip).To(Equal(wantIP))
 		})
 	})
 
@@ -969,14 +1005,18 @@ var _ = Describe("ComputeInstance Controller", func() {
 
 	Context("handleKubeVirtVM", func() {
 		var (
-			ctx        context.Context
-			reconciler *ComputeInstanceReconciler
-			instance   *osacv1alpha1.ComputeInstance
+			ctx          context.Context
+			reconciler   *ComputeInstanceReconciler
+			targetClient client.Client
+			instance     *osacv1alpha1.ComputeInstance
 		)
 
 		BeforeEach(func() {
 			ctx = context.Background()
-			reconciler = &ComputeInstanceReconciler{}
+			reconciler = NewComputeInstanceReconciler(testMcManager, "", "", &mockProvisioningProvider{}, 0, 0, mcmanager.LocalCluster)
+			var err error
+			targetClient, err = reconciler.getTargetClient(ctx)
+			Expect(err).NotTo(HaveOccurred())
 			instance = &osacv1alpha1.ComputeInstance{}
 		})
 
@@ -989,7 +1029,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 					},
 				},
 			}
-			Expect(reconciler.handleKubeVirtVM(ctx, instance, kv)).To(Succeed())
+			Expect(reconciler.handleKubeVirtVM(ctx, targetClient, instance, kv)).To(Succeed())
 
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionProvisioned).Status).To(Equal(metav1.ConditionTrue))
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionAvailable).Status).To(Equal(metav1.ConditionTrue))
@@ -1002,7 +1042,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 					PrintableStatus: kubevirtv1.VirtualMachineStatusRunning,
 				},
 			}
-			Expect(reconciler.handleKubeVirtVM(ctx, instance, kv)).To(Succeed())
+			Expect(reconciler.handleKubeVirtVM(ctx, targetClient, instance, kv)).To(Succeed())
 
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionProvisioned).Status).To(Equal(metav1.ConditionTrue))
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionAvailable).Status).To(Equal(metav1.ConditionFalse))
@@ -1018,7 +1058,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 					},
 				},
 			}
-			Expect(reconciler.handleKubeVirtVM(ctx, instance, kv)).To(Succeed())
+			Expect(reconciler.handleKubeVirtVM(ctx, targetClient, instance, kv)).To(Succeed())
 
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionProvisioned).Status).To(Equal(metav1.ConditionTrue))
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionRestartRequired).Status).To(Equal(metav1.ConditionTrue))
@@ -1030,7 +1070,7 @@ var _ = Describe("ComputeInstance Controller", func() {
 					PrintableStatus: kubevirtv1.VirtualMachineStatusProvisioning,
 				},
 			}
-			Expect(reconciler.handleKubeVirtVM(ctx, instance, kv)).To(Succeed())
+			Expect(reconciler.handleKubeVirtVM(ctx, targetClient, instance, kv)).To(Succeed())
 
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionProvisioned).Status).To(Equal(metav1.ConditionFalse))
 			Expect(instance.GetStatusCondition(osacv1alpha1.ComputeInstanceConditionAvailable).Status).To(Equal(metav1.ConditionFalse))
