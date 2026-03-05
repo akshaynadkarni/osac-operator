@@ -871,6 +871,10 @@ func kvVMHasConditionWithStatus(vm *kubevirtv1.VirtualMachine, cond kubevirtv1.V
 // Unknown preserves currentPhase: the hypervisor host is temporarily unreachable and the VM
 // may still be healthy. The phase clears automatically when the host recovers.
 //
+// An empty PrintableStatus ("") occurs when our watch fires before KubeVirt's controller
+// has processed the new VM CR. Like Unknown, it preserves the current phase to avoid a
+// transient Failed.
+//
 // All remaining values (Terminating, CrashLoopBackOff, ErrorUnschedulable, ErrImagePull,
 // ImagePullBackOff, ErrorPvcNotFound, DataVolumeError) map to Failed.
 func determinePhaseFromPrintableStatus(ctx context.Context, kv *kubevirtv1.VirtualMachine, currentPhase v1alpha1.ComputeInstancePhaseType) v1alpha1.ComputeInstancePhaseType {
@@ -898,6 +902,12 @@ func determinePhaseFromPrintableStatus(ctx context.Context, kv *kubevirtv1.Virtu
 	case kubevirtv1.VirtualMachineStatusUnknown:
 		// Host is temporarily unreachable. Preserve the last known phase rather than
 		// asserting Failed. Clears automatically when the host recovers.
+		return currentPhase
+	case "":
+		// PrintableStatus not yet set by KubeVirt — race condition at VM creation.
+		// Our watch fires before KubeVirt's controller processes the new VM CR.
+		// Preserve the current phase (always Starting at this point) to avoid a
+		// transient Failed.
 		return currentPhase
 	default:
 		// Covers: Terminating, CrashLoopBackOff, ErrorUnschedulable, ErrImagePull,

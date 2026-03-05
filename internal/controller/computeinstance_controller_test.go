@@ -1000,6 +1000,11 @@ var _ = Describe("ComputeInstance Controller", func() {
 				kvVM(kubevirtv1.VirtualMachineStatusUnknown), osacv1alpha1.ComputeInstancePhaseRunning, osacv1alpha1.ComputeInstancePhaseRunning),
 			Entry("Unknown preserves Stopped phase",
 				kvVM(kubevirtv1.VirtualMachineStatusUnknown), osacv1alpha1.ComputeInstancePhaseStopped, osacv1alpha1.ComputeInstancePhaseStopped),
+			// Empty PrintableStatus: preserves current phase (race at VM creation)
+			Entry("Empty PrintableStatus preserves Starting phase",
+				kvVM(""), osacv1alpha1.ComputeInstancePhaseStarting, osacv1alpha1.ComputeInstancePhaseStarting),
+			Entry("Empty PrintableStatus preserves Running phase",
+				kvVM(""), osacv1alpha1.ComputeInstancePhaseRunning, osacv1alpha1.ComputeInstancePhaseRunning),
 		)
 	})
 
