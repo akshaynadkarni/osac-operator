@@ -83,6 +83,10 @@ type SubnetStatus struct {
 	// +kubebuilder:validation:Enum=Progressing;Failed;Ready;Deleting
 	Phase SubnetPhaseType `json:"phase,omitempty"`
 
+	// Jobs holds an array of JobStatus tracking provisioning and deprovisioning operations
+	// +kubebuilder:validation:Optional
+	Jobs []JobStatus `json:"jobs,omitempty"`
+
 	// Conditions holds an array of metav1.Condition that describe the state of the Subnet
 	// +kubebuilder:validation:Optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
