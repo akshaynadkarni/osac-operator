@@ -767,48 +767,64 @@ var _ = Describe("ComputeInstance Controller", func() {
 				reconciler = NewComputeInstanceReconciler(testMcManager, "", "", &mockProvisioningProvider{}, 0, 0, mcmanager.LocalCluster)
 			})
 
-			It("should return true when no job exists", func() {
-				instance := &osacv1alpha1.ComputeInstance{}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeTrue())
-				Expect(job).To(BeNil())
-			})
-
-			It("should return true when job has empty ID", func() {
+			It("should trigger when no job exists and config versions differ", func() {
 				instance := &osacv1alpha1.ComputeInstance{
 					Status: osacv1alpha1.ComputeInstanceStatus{
-						Jobs: []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: ""}},
+						DesiredConfigVersion: "abc123",
 					},
 				}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeTrue())
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionTrigger))
 				Expect(job).To(BeNil())
 			})
 
-			It("should return false when job is still running", func() {
+			It("should trigger when job has empty ID and config versions differ", func() {
+				instance := &osacv1alpha1.ComputeInstance{
+					Status: osacv1alpha1.ComputeInstanceStatus{
+						DesiredConfigVersion: "abc123",
+						Jobs:                 []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: ""}},
+					},
+				}
+				action, _ := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionTrigger))
+			})
+
+			It("should skip when no job exists and config versions match", func() {
+				instance := &osacv1alpha1.ComputeInstance{
+					Status: osacv1alpha1.ComputeInstanceStatus{
+						DesiredConfigVersion:    "abc123",
+						ReconciledConfigVersion: "abc123",
+					},
+				}
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionSkip))
+				Expect(job).To(BeNil())
+			})
+
+			It("should poll when job is still running", func() {
 				instance := &osacv1alpha1.ComputeInstance{
 					Status: osacv1alpha1.ComputeInstanceStatus{
 						Jobs: []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: "job-1", State: osacv1alpha1.JobStateRunning}},
 					},
 				}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeFalse())
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionPoll))
 				Expect(job).NotTo(BeNil())
 				Expect(job.JobID).To(Equal("job-1"))
 			})
 
-			It("should return false when job is pending", func() {
+			It("should poll when job is pending", func() {
 				instance := &osacv1alpha1.ComputeInstance{
 					Status: osacv1alpha1.ComputeInstanceStatus{
 						Jobs: []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: "job-1", State: osacv1alpha1.JobStatePending}},
 					},
 				}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeFalse())
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionPoll))
 				Expect(job).NotTo(BeNil())
 			})
 
-			It("should return false when job succeeded and config versions match", func() {
+			It("should skip when job succeeded and config versions match", func() {
 				instance := &osacv1alpha1.ComputeInstance{
 					Status: osacv1alpha1.ComputeInstanceStatus{
 						DesiredConfigVersion:    "abc123",
@@ -816,12 +832,12 @@ var _ = Describe("ComputeInstance Controller", func() {
 						Jobs:                    []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: "job-1", State: osacv1alpha1.JobStateSucceeded}},
 					},
 				}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeFalse())
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionSkip))
 				Expect(job).NotTo(BeNil())
 			})
 
-			It("should return true when job succeeded but config versions differ", func() {
+			It("should trigger when job succeeded but config versions differ", func() {
 				instance := &osacv1alpha1.ComputeInstance{
 					Status: osacv1alpha1.ComputeInstanceStatus{
 						DesiredConfigVersion:    "new-version",
@@ -829,12 +845,12 @@ var _ = Describe("ComputeInstance Controller", func() {
 						Jobs:                    []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: "job-1", State: osacv1alpha1.JobStateSucceeded}},
 					},
 				}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeTrue())
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionTrigger))
 				Expect(job).NotTo(BeNil())
 			})
 
-			It("should return true when job failed and config versions differ", func() {
+			It("should trigger when job failed and config versions differ", func() {
 				instance := &osacv1alpha1.ComputeInstance{
 					Status: osacv1alpha1.ComputeInstanceStatus{
 						DesiredConfigVersion:    "new-version",
@@ -842,8 +858,21 @@ var _ = Describe("ComputeInstance Controller", func() {
 						Jobs:                    []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: "job-1", State: osacv1alpha1.JobStateFailed}},
 					},
 				}
-				trigger, job := reconciler.shouldTriggerProvision(ctx, instance)
-				Expect(trigger).To(BeTrue())
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionTrigger))
+				Expect(job).NotTo(BeNil())
+			})
+
+			It("should skip when job failed but config versions match", func() {
+				instance := &osacv1alpha1.ComputeInstance{
+					Status: osacv1alpha1.ComputeInstanceStatus{
+						DesiredConfigVersion:    "abc123",
+						ReconciledConfigVersion: "abc123",
+						Jobs:                    []osacv1alpha1.JobStatus{{Type: osacv1alpha1.JobTypeProvision, JobID: "job-1", State: osacv1alpha1.JobStateFailed}},
+					},
+				}
+				action, job := reconciler.shouldTriggerProvision(ctx, instance)
+				Expect(action).To(Equal(provisionSkip))
 				Expect(job).NotTo(BeNil())
 			})
 		})

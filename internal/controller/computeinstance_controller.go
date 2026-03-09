@@ -361,9 +361,12 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 	}
 
 	// Check if we need to trigger a (new) provision job
-	triggerProvision, latestProvisionJob := r.shouldTriggerProvision(ctx, instance)
+	action, latestProvisionJob := r.shouldTriggerProvision(ctx, instance)
 
-	if triggerProvision {
+	switch action {
+	case provisionSkip:
+		return ctrl.Result{}, nil
+	case provisionTrigger:
 		log.Info("triggering provisioning", "provider", r.ProvisioningProvider.Name())
 		result, err := r.ProvisioningProvider.TriggerProvision(ctx, instance)
 		if err != nil {
@@ -400,7 +403,7 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
-	// We have a job ID, check its status
+	// provisionPoll: we have a job ID, check its status
 	status, err := r.ProvisioningProvider.GetProvisionStatus(ctx, instance, latestProvisionJob.JobID)
 	if err != nil {
 		log.Error(err, "failed to get provision job status", "jobID", latestProvisionJob.JobID)
@@ -928,34 +931,54 @@ func determinePhaseFromPrintableStatus(ctx context.Context, kv *kubevirtv1.Virtu
 	}
 }
 
-// shouldTriggerProvision determines whether a new provision job should be triggered.
-// Returns true and nil when provisioning is needed (no job exists or spec changed since last successful provision).
-// Returns false and the latest provision job when provisioning should be skipped (job is in progress or spec unchanged).
-// When the cached instance shows no job, it reads fresh from the API server to prevent duplicate
-// triggers caused by stale informer cache reads between back-to-back reconciles.
-func (r *ComputeInstanceReconciler) shouldTriggerProvision(ctx context.Context, instance *v1alpha1.ComputeInstance) (bool, *v1alpha1.JobStatus) {
-	log := ctrllog.FromContext(ctx)
+// provisionAction represents the outcome of shouldTriggerProvision.
+type provisionAction int
+
+const (
+	provisionSkip    provisionAction = iota // nothing to do
+	provisionTrigger                        // trigger a new provision job
+	provisionPoll                           // poll an existing non-terminal job
+)
+
+// shouldTriggerProvision determines the next provisioning action.
+// Returns provisionPoll with the in-progress job when one is already running.
+// Returns provisionSkip when config versions match (no change needed).
+// Returns provisionTrigger when provisioning is needed, after checking the API server
+// to guard against stale informer cache reads between back-to-back reconciles.
+func (r *ComputeInstanceReconciler) shouldTriggerProvision(ctx context.Context, instance *v1alpha1.ComputeInstance) (provisionAction, *v1alpha1.JobStatus) {
 	latestJob := v1alpha1.FindLatestJobByType(instance.Status.Jobs, v1alpha1.JobTypeProvision)
 
-	if latestJob == nil || latestJob.JobID == "" {
-		fresh := &v1alpha1.ComputeInstance{}
-		if err := r.mgr.GetLocalManager().GetAPIReader().Get(ctx, client.ObjectKeyFromObject(instance), fresh); err == nil {
-			freshJob := v1alpha1.FindLatestJobByType(fresh.Status.Jobs, v1alpha1.JobTypeProvision)
-			if freshJob != nil && freshJob.JobID != "" && !freshJob.State.IsTerminal() {
-				log.Info("skipping provision trigger: non-terminal job found via API server", "jobID", freshJob.JobID, "state", freshJob.State)
-				instance.Status.Jobs = fresh.Status.Jobs
-				return false, freshJob
-			}
-		}
-		return true, nil
+	if latestJob != nil && latestJob.JobID != "" && !latestJob.State.IsTerminal() {
+		return provisionPoll, latestJob
 	}
-	if !latestJob.State.IsTerminal() {
-		return false, latestJob
+	if instance.Status.DesiredConfigVersion == instance.Status.ReconciledConfigVersion {
+		return provisionSkip, latestJob
 	}
-	if instance.Status.DesiredConfigVersion != instance.Status.ReconciledConfigVersion {
-		return true, latestJob
+	// Provision is needed (no job, or spec changed since last terminal job).
+	// Check the API server to guard against stale informer cache: a prior
+	// reconcile may have already triggered a job that the cache hasn't picked up.
+	if freshJob, ok := r.checkAPIServerForNonTerminalJob(ctx, instance); ok {
+		return provisionPoll, freshJob
 	}
-	return false, latestJob
+	return provisionTrigger, latestJob
+}
+
+// checkAPIServerForNonTerminalJob reads the instance directly from the API server
+// and returns a non-terminal provision job if one exists. This guards against
+// duplicate triggers when the informer cache is stale between back-to-back reconciles.
+func (r *ComputeInstanceReconciler) checkAPIServerForNonTerminalJob(ctx context.Context, instance *v1alpha1.ComputeInstance) (*v1alpha1.JobStatus, bool) {
+	log := ctrllog.FromContext(ctx)
+	fresh := &v1alpha1.ComputeInstance{}
+	if err := r.mgr.GetLocalManager().GetAPIReader().Get(ctx, client.ObjectKeyFromObject(instance), fresh); err != nil {
+		return nil, false
+	}
+	freshJob := v1alpha1.FindLatestJobByType(fresh.Status.Jobs, v1alpha1.JobTypeProvision)
+	if freshJob != nil && freshJob.JobID != "" && !freshJob.State.IsTerminal() {
+		log.Info("skipping provision trigger: non-terminal job found via API server", "jobID", freshJob.JobID, "state", freshJob.State)
+		instance.Status.Jobs = fresh.Status.Jobs
+		return freshJob, true
+	}
+	return nil, false
 }
 
 // handleDesiredConfigVersion computes a version (hash) of the spec (using FNV-1a) and stores it as hexadecimal in status.DesiredConfigVersion.

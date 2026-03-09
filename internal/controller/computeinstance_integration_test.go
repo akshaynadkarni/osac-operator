@@ -151,9 +151,10 @@ func (p *controllableProvider) setDeprovisionJobState(state osacv1alpha1.JobStat
 
 var _ = Describe("ComputeInstance Integration Tests", func() {
 	const (
-		testNamespace = "default"
-		timeout       = 10 * time.Second
-		interval      = 250 * time.Millisecond
+		testNamespace            = "default"
+		testDesiredConfigVersion = "initial"
+		timeout                  = 10 * time.Second
+		interval                 = 250 * time.Millisecond
 	)
 
 	var (
@@ -182,6 +183,10 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
 			DeferCleanup(k8sClient.Delete, ctx, instance)
+
+			// Simulate handleDesiredConfigVersion having run
+			instance.Status.DesiredConfigVersion = testDesiredConfigVersion
+			Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
 
 			// First call should trigger the job
 			result, err := reconciler.handleProvisioning(ctx, instance)
@@ -246,6 +251,10 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
 			DeferCleanup(k8sClient.Delete, ctx, instance)
+
+			// Simulate handleDesiredConfigVersion having run
+			instance.Status.DesiredConfigVersion = testDesiredConfigVersion
+			Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
 
 			// Trigger the job
 			_, err := reconciler.handleProvisioning(ctx, instance)
@@ -365,6 +374,10 @@ var _ = Describe("ComputeInstance Integration Tests", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+
+			// Simulate handleDesiredConfigVersion having run
+			instance.Status.DesiredConfigVersion = testDesiredConfigVersion
+			Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
 			DeferCleanup(k8sClient.Delete, ctx, instance)
 
 			// Trigger job

@@ -102,7 +102,8 @@ var _ = Describe("ComputeInstance Provisioning", func() {
 				Name:      "test-instance",
 				Namespace: "default",
 			},
-			Spec: newTestComputeInstanceSpec("test_template"),
+			Spec:   newTestComputeInstanceSpec("test_template"),
+			Status: osacv1alpha1.ComputeInstanceStatus{DesiredConfigVersion: "initial"},
 		}
 		reconciler = NewComputeInstanceReconciler(testMcManager, "", "", &mockProvisioningProvider{}, 30*time.Second, DefaultMaxJobHistory, mcmanager.LocalCluster)
 	})
