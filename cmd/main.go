@@ -58,9 +58,9 @@ import (
 	"sigs.k8s.io/multicluster-runtime/providers/single"
 
 	v1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
+	"github.com/osac-project/osac-operator/helpers"
 	"github.com/osac-project/osac-operator/internal/aap"
 	"github.com/osac-project/osac-operator/internal/controller"
-	"github.com/osac-project/osac-operator/internal/helpers"
 	"github.com/osac-project/osac-operator/internal/provisioning"
 	// +kubebuilder:scaffold:imports
 )
