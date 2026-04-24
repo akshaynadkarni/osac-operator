@@ -46,4 +46,7 @@ var (
 
 	// osacTenantAnnotation is the annotation used to reference the tenant name
 	osacTenantAnnotation string = fmt.Sprintf("%s/tenant", osacPrefix)
+
+	// osacStorageTierLabel is the label key that identifies the storage tier of a StorageClass
+	osacStorageTierLabel string = fmt.Sprintf("%s/storage-tier", osacPrefix)
 )
