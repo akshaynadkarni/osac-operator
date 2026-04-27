@@ -44,14 +44,18 @@ type ClusterOrderSpec struct {
 	// PullSecret contains credentials for authenticating to container image repositories.
 	// If not provided, the provider's default pull secret is used.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=262144
 	PullSecret string `json:"pullSecret,omitempty"`
 	// SSHPublicKey is an SSH public key installed on cluster worker nodes.
 	// If not provided, the provider's default SSH key is used.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=16384
 	SSHPublicKey string `json:"sshPublicKey,omitempty"`
 	// ReleaseImage is the OCP release image URL that controls the OpenShift version.
 	// If not provided, the template's default release image is used.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^.+/.+:.+$`
 	ReleaseImage string `json:"releaseImage,omitempty"`
 	// Network contains cluster networking configuration.
 	// +kubebuilder:validation:Optional
@@ -63,11 +67,13 @@ type ClusterNetworkSpec struct {
 	// PodCIDR is the CIDR for the cluster's pod network.
 	// Defaults to 10.128.0.0/14 if not specified.
 	// +kubebuilder:validation:Optional
+	// Coarse format check only — full CIDR validation (e.g. net.ParseCIDR) is done server-side.
 	// +kubebuilder:validation:Pattern=`^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$`
 	PodCIDR string `json:"podCIDR,omitempty"`
 	// ServiceCIDR is the CIDR for the cluster's service network.
 	// Defaults to 172.30.0.0/16 if not specified.
 	// +kubebuilder:validation:Optional
+	// Coarse format check only — full CIDR validation (e.g. net.ParseCIDR) is done server-side.
 	// +kubebuilder:validation:Pattern=`^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$`
 	ServiceCIDR string `json:"serviceCIDR,omitempty"`
 }
