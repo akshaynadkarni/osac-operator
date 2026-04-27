@@ -828,6 +828,7 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 				Type:               string(osacv1alpha1.ComputeInstanceConditionReady),
 				Status:             metav1.ConditionTrue,
 				Reason:             osacv1alpha1.ReasonAsExpected,
+				Message:            "",
 				LastTransitionTime: metav1.NewTime(time.Now().UTC()),
 			})
 			Expect(k8sClient.Status().Update(ctx, computeInstance)).To(Succeed())
@@ -841,6 +842,37 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_AVAILABLE {
 					Expect(cond.GetStatus()).To(Equal(privatev1.ConditionStatus_CONDITION_STATUS_TRUE))
 					Expect(cond.GetReason()).To(Equal(osacv1alpha1.ReasonAsExpected))
+					Expect(cond.GetMessage()).To(Equal(""))
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue())
+		})
+
+		It("should sync Ready condition when False with reason and message", func() {
+			computeInstance := &osacv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, computeInstance)).To(Succeed())
+			msg := "VirtualMachine not yet created, waiting for provisioning"
+			computeInstance.Status.Conditions = append(computeInstance.Status.Conditions, metav1.Condition{
+				Type:               string(osacv1alpha1.ComputeInstanceConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             osacv1alpha1.ReasonWaitingForVM,
+				Message:            msg,
+				LastTransitionTime: metav1.NewTime(time.Now().UTC()),
+			})
+			Expect(k8sClient.Status().Update(ctx, computeInstance)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mockClient.updateCalled).To(BeTrue())
+
+			found := false
+			for _, cond := range mockClient.lastUpdate.GetStatus().GetConditions() {
+				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_AVAILABLE {
+					Expect(cond.GetStatus()).To(Equal(privatev1.ConditionStatus_CONDITION_STATUS_FALSE))
+					Expect(cond.GetReason()).To(Equal(osacv1alpha1.ReasonWaitingForVM))
+					Expect(cond.GetMessage()).To(Equal(msg))
 					found = true
 					break
 				}
