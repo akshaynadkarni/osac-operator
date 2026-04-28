@@ -839,7 +839,7 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 
 			found := false
 			for _, cond := range mockClient.lastUpdate.GetStatus().GetConditions() {
-				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_AVAILABLE {
+				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_READY {
 					Expect(cond.GetStatus()).To(Equal(privatev1.ConditionStatus_CONDITION_STATUS_TRUE))
 					Expect(cond.GetReason()).To(Equal(osacv1alpha1.ReasonAsExpected))
 					Expect(cond.GetMessage()).To(Equal(""))
@@ -869,7 +869,7 @@ var _ = Describe("ComputeInstanceFeedbackReconciler", func() {
 
 			found := false
 			for _, cond := range mockClient.lastUpdate.GetStatus().GetConditions() {
-				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_AVAILABLE {
+				if cond.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_READY {
 					Expect(cond.GetStatus()).To(Equal(privatev1.ConditionStatus_CONDITION_STATUS_FALSE))
 					Expect(cond.GetReason()).To(Equal(osacv1alpha1.ReasonWaitingForVM))
 					Expect(cond.GetMessage()).To(Equal(msg))

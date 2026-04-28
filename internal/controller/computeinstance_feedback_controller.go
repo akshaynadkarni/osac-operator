@@ -272,7 +272,7 @@ func (t *computeInstanceFeedbackReconcilerTask) syncReady(ctx context.Context) {
 	if crCondition == nil {
 		return
 	}
-	t.syncVMConditionFromCR(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_AVAILABLE, crCondition)
+	t.syncVMConditionFromCR(privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_READY, crCondition)
 }
 
 // syncRestartInProgress synchronizes the RESTART_IN_PROGRESS VM condition from the RestartInProgress CR condition.
