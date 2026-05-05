@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -57,6 +58,7 @@ type PublicIPReconciler struct {
 	client.Client
 	APIReader                client.Reader
 	Scheme                   *runtime.Scheme
+	Recorder                 events.EventRecorder
 	mgr                      mcmanager.Manager
 	NetworkingNamespace      string
 	ComputeInstanceNamespace string
@@ -92,6 +94,7 @@ func NewPublicIPReconciler(
 		Client:                   mgr.GetLocalManager().GetClient(),
 		APIReader:                mgr.GetLocalManager().GetAPIReader(),
 		Scheme:                   mgr.GetLocalManager().GetScheme(),
+		Recorder:                 mgr.GetLocalManager().GetEventRecorder(publicipControllerName),
 		mgr:                      mgr,
 		NetworkingNamespace:      networkingNamespace,
 		ComputeInstanceNamespace: computeInstanceNamespace,
@@ -106,7 +109,9 @@ func NewPublicIPReconciler(
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=publicips/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=publicips/finalizers,verbs=update
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=publicippools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances,verbs=get;list;watch
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances/finalizers,verbs=update
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get
 
 // Reconcile handles create/update/delete for a PublicIP CR.

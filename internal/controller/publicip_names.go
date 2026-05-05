@@ -17,8 +17,17 @@ import (
 	"fmt"
 )
 
+const (
+	publicipControllerName = "publicip-controller"
+
+	eventReasonAttached     = "Attached"
+	eventReasonDetached     = "Detached"
+	eventReasonAutoDetached = "AutoDetached"
+)
+
 var (
 	osacPublicIPIDLabel                   string = fmt.Sprintf("%s/publicip-uuid", osacPrefix)
 	osacPublicIPFeedbackFinalizer         string = fmt.Sprintf("%s/publicip-feedback", osacPrefix)
 	osacPublicIPTargetNamespaceAnnotation string = fmt.Sprintf("%s/publicip-target-namespace", osacPrefix)
+	osacPublicIPDetachFinalizer           string = fmt.Sprintf("%s/publicip-detach", osacPrefix)
 )
