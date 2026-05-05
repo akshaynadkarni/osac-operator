@@ -244,41 +244,6 @@ func (t *publicIPFeedbackReconcilerTask) syncState(ctx context.Context) {
 	}
 }
 
-func (t *publicIPFeedbackReconcilerTask) syncPhase(ctx context.Context) {
-	switch t.object.Status.Phase {
-	case v1alpha1.PublicIPPhaseProgressing:
-		t.syncPhaseProgressing()
-	case v1alpha1.PublicIPPhaseFailed:
-		t.syncPhaseFailed()
-	case v1alpha1.PublicIPPhaseReady:
-		t.syncPhaseReady()
-	case v1alpha1.PublicIPPhaseDeleting:
-		t.syncPhaseDeleting()
-	default:
-		log := ctrllog.FromContext(ctx)
-		log.Info(
-			"Unknown phase, will ignore it",
-			"phase", t.object.Status.Phase,
-		)
-	}
-}
-
-func (t *publicIPFeedbackReconcilerTask) syncPhaseProgressing() {
-	t.publicIP.GetStatus().SetState(privatev1.PublicIPState_PUBLIC_IP_STATE_PENDING)
-}
-
-func (t *publicIPFeedbackReconcilerTask) syncPhaseFailed() {
-	t.publicIP.GetStatus().SetState(privatev1.PublicIPState_PUBLIC_IP_STATE_FAILED)
-}
-
-func (t *publicIPFeedbackReconcilerTask) syncPhaseReady() {
-	t.publicIP.GetStatus().SetState(privatev1.PublicIPState_PUBLIC_IP_STATE_ALLOCATED)
-}
-
-func (t *publicIPFeedbackReconcilerTask) syncPhaseDeleting() {
-	t.publicIP.GetStatus().SetState(privatev1.PublicIPState_PUBLIC_IP_STATE_RELEASING)
-}
-
 func (t *publicIPFeedbackReconcilerTask) syncAddress() {
 	if t.object.Status.Address != "" {
 		t.publicIP.GetStatus().SetAddress(t.object.Status.Address)
