@@ -21,9 +21,12 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -55,6 +58,7 @@ type PublicIPReconciler struct {
 	client.Client
 	APIReader                client.Reader
 	Scheme                   *runtime.Scheme
+	Recorder                 events.EventRecorder
 	mgr                      mcmanager.Manager
 	NetworkingNamespace      string
 	ComputeInstanceNamespace string
@@ -90,6 +94,7 @@ func NewPublicIPReconciler(
 		Client:                   mgr.GetLocalManager().GetClient(),
 		APIReader:                mgr.GetLocalManager().GetAPIReader(),
 		Scheme:                   mgr.GetLocalManager().GetScheme(),
+		Recorder:                 mgr.GetLocalManager().GetEventRecorder(publicipControllerName),
 		mgr:                      mgr,
 		NetworkingNamespace:      networkingNamespace,
 		ComputeInstanceNamespace: computeInstanceNamespace,
@@ -104,7 +109,10 @@ func NewPublicIPReconciler(
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=publicips/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=publicips/finalizers,verbs=update
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=publicippools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances,verbs=get;list;watch
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=computeinstances/finalizers,verbs=update
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get
 
 // Reconcile handles create/update/delete for a PublicIP CR.
 // On create/update it ensures a finalizer, resolves the parent pool, and runs provisioning.
@@ -167,6 +175,7 @@ func (r *PublicIPReconciler) handleUpdate(ctx context.Context, publicIP *v1alpha
 
 	if publicIP.Status.Phase == "" {
 		publicIP.Status.Phase = v1alpha1.PublicIPPhaseProgressing
+		publicIP.Status.State = v1alpha1.PublicIPStatePending
 	}
 
 	// Resolve the parent PublicIPPool by the fulfillment-service UUID stored in spec.pool.
@@ -197,6 +206,11 @@ func (r *PublicIPReconciler) handleUpdate(ctx context.Context, publicIP *v1alpha
 	if publicIP.Annotations == nil {
 		publicIP.Annotations = make(map[string]string)
 	}
+
+	// Capture CI UUID before syncComputeInstanceTargetNamespaceAnnotation, which may
+	// clear spec.computeInstance via handleAutoDetach. handleProvisioning's OnSuccess
+	// needs this to remove the CI detach finalizer after a detach job completes.
+	priorCIUUID := publicIP.Spec.ComputeInstance
 
 	// Resolve the target namespace for the ComputeInstance attachment, if any.
 	needsUpdate, requeueForCI, err := r.syncComputeInstanceTargetNamespaceAnnotation(ctx, publicIP)
@@ -248,14 +262,58 @@ func (r *PublicIPReconciler) handleUpdate(ctx context.Context, publicIP *v1alpha
 		LastTransitionTime: metav1.Now(),
 	})
 
-	// Transition to Progressing on first provision or when spec changed after a previous
-	// success. Don't override Failed during backoff (the provisioning lifecycle handles retry).
-	if publicIP.Status.Phase == "" || (publicIP.Status.Phase == v1alpha1.PublicIPPhaseReady &&
-		!provisioning.IsConfigApplied(&publicIP.Status.Jobs, publicIP.Status.DesiredConfigVersion)) {
+	// Detect attach/detach transitions and set transitional state before provisioning
+	if publicIP.Status.State == v1alpha1.PublicIPStateAllocated && publicIP.Spec.ComputeInstance != "" {
 		publicIP.Status.Phase = v1alpha1.PublicIPPhaseProgressing
+		publicIP.Status.State = v1alpha1.PublicIPStateAttaching
+	} else if publicIP.Status.State == v1alpha1.PublicIPStateAttached && publicIP.Spec.ComputeInstance == "" {
+		publicIP.Status.Phase = v1alpha1.PublicIPPhaseProgressing
+		publicIP.Status.State = v1alpha1.PublicIPStateReleasing
+		// Emit detach event only for manual detach. Auto-detach already emitted
+		// an AutoDetached event in handleAutoDetach; needsUpdate is true when
+		// the spec was cleared by auto-detach in this reconcile.
+		if !needsUpdate && r.Recorder != nil {
+			r.Recorder.Eventf(publicIP, nil, corev1.EventTypeNormal,
+				eventReasonDetached, eventActionReconcile,
+				"PublicIP detached from ComputeInstance")
+		}
+	} else if publicIP.Status.Phase == "" || (publicIP.Status.Phase == v1alpha1.PublicIPPhaseReady &&
+		!provisioning.IsConfigApplied(&publicIP.Status.Jobs, publicIP.Status.DesiredConfigVersion)) {
+		// Transition to Progressing on first provision or when spec changed after a previous
+		// success. Don't override Failed during backoff (the provisioning lifecycle handles retry).
+		publicIP.Status.Phase = v1alpha1.PublicIPPhaseProgressing
+		if publicIP.Status.State == "" {
+			publicIP.Status.State = v1alpha1.PublicIPStatePending
+		}
 	}
 
-	return r.handleProvisioning(ctx, publicIP)
+	r.maybePopulateAddress(ctx, publicIP)
+
+	return r.handleProvisioning(ctx, publicIP, priorCIUUID)
+}
+
+// maybePopulateAddress sets status.address from the MetalLB LoadBalancer Service
+// after initial provisioning succeeds.
+//
+// State == Allocated is set exclusively by OnSuccess after the AAP provisioning
+// job reports success, so this guard ensures address population happens strictly
+// after provisioning completes. One-shot attach (Pending -> Attached) skips
+// Allocated, so that path populates the address inside OnSuccess instead.
+func (r *PublicIPReconciler) maybePopulateAddress(ctx context.Context, publicIP *v1alpha1.PublicIP) {
+	if publicIP.Status.State != v1alpha1.PublicIPStateAllocated || publicIP.Status.Address != "" {
+		return
+	}
+	log := ctrllog.FromContext(ctx)
+	targetClient, err := getTargetClient(ctx, r.mgr, r.targetCluster)
+	if err != nil {
+		log.Error(err, "failed to get target cluster client for address lookup")
+		return
+	}
+	ipAddress := r.getPublicIPAddress(ctx, targetClient, publicIP.Name)
+	if ipAddress != "" {
+		publicIP.Status.Address = ipAddress
+		log.Info("populated PublicIP address from LoadBalancer Service", "address", ipAddress)
+	}
 }
 
 // syncComputeInstanceTargetNamespaceAnnotation resolves the VM namespace for the
@@ -290,11 +348,33 @@ func (r *PublicIPReconciler) syncComputeInstanceTargetNamespaceAnnotation(
 		return false, false, err
 	}
 	if len(ciList.Items) == 0 {
+		// CI not found. If state is Attached or Failed, the CI was deleted externally
+		// (e.g., finalizer removed manually). Clear the stale reference.
+		if publicIP.Status.State == v1alpha1.PublicIPStateAttached ||
+			publicIP.Status.State == v1alpha1.PublicIPStateFailed {
+			log.Info("ComputeInstance not found, clearing stale spec reference",
+				"computeInstanceUUID", publicIP.Spec.ComputeInstance,
+				"state", publicIP.Status.State)
+			publicIP.Spec.ComputeInstance = ""
+			return true, false, nil
+		}
 		log.Info("ComputeInstance not found, requeueing", "computeInstanceUUID", publicIP.Spec.ComputeInstance)
 		return false, true, nil
 	}
 
 	ci := &ciList.Items[0]
+
+	// Auto-detach: if CI is being deleted, handle per current PublicIP state
+	if !ci.DeletionTimestamp.IsZero() {
+		autoDetachResult, err := r.handleAutoDetach(ctx, publicIP, ci)
+		if err != nil {
+			return false, false, err
+		}
+		// autoDetachResult: specChanged=true means we cleared spec.computeInstance
+		// and need to persist+refetch; requeue=true means requeue for in-flight ops
+		return autoDetachResult.specChanged, autoDetachResult.requeue, nil
+	}
+
 	if ci.Status.VirtualMachineReference == nil {
 		log.Info("ComputeInstance has no VirtualMachineReference yet, requeueing",
 			"computeInstance", ci.Name, "computeInstanceUUID", publicIP.Spec.ComputeInstance)
@@ -312,6 +392,157 @@ func (r *PublicIPReconciler) syncComputeInstanceTargetNamespaceAnnotation(
 	}
 
 	return false, false, nil
+}
+
+type autoDetachResult struct {
+	specChanged bool
+	requeue     bool
+}
+
+// handleAutoDetach processes a PublicIP whose referenced ComputeInstance is being
+// deleted. It adds a finalizer to the CI to block premature garbage collection, and
+// clears spec.computeInstance based on the current state to trigger the existing detach flow.
+func (r *PublicIPReconciler) handleAutoDetach(
+	ctx context.Context,
+	publicIP *v1alpha1.PublicIP,
+	ci *v1alpha1.ComputeInstance,
+) (autoDetachResult, error) {
+	log := ctrllog.FromContext(ctx)
+
+	// Add finalizer to CI to guarantee detach completes before CI deletion
+	if controllerutil.AddFinalizer(ci, osacPublicIPDetachFinalizer) {
+		log.Info("adding publicip-detach finalizer to ComputeInstance",
+			"computeInstance", ci.Name,
+			"computeInstanceUUID", publicIP.Spec.ComputeInstance)
+		if err := r.Update(ctx, ci); err != nil {
+			return autoDetachResult{}, err
+		}
+	}
+
+	switch publicIP.Status.State {
+	case v1alpha1.PublicIPStateAttached:
+		// Clear spec to trigger existing detach flow (Attached -> Releasing)
+		log.Info("auto-detaching PublicIP: ComputeInstance is being deleted",
+			"computeInstanceUUID", publicIP.Spec.ComputeInstance)
+		publicIP.Spec.ComputeInstance = ""
+		// Emit warning event with generic message (no CI details for tenant reuse safety)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(publicIP, nil, corev1.EventTypeWarning,
+				eventReasonAutoDetached, eventActionReconcile,
+				"Auto-detached: referenced ComputeInstance was deleted")
+		}
+		return autoDetachResult{specChanged: true}, nil
+
+	case v1alpha1.PublicIPStateFailed:
+		// Clear stale reference, no AAP call needed. State stays Failed.
+		log.Info("clearing stale ComputeInstance reference on Failed PublicIP",
+			"computeInstanceUUID", publicIP.Spec.ComputeInstance)
+		ciUUID := publicIP.Spec.ComputeInstance
+		publicIP.Spec.ComputeInstance = ""
+		// No AAP detach job runs for Failed state, so OnSuccess will never fire.
+		// Attempt CI finalizer removal directly.
+		if err := r.maybeRemoveCIFinalizer(ctx, ciUUID, publicIP.Name); err != nil {
+			return autoDetachResult{}, err
+		}
+		return autoDetachResult{specChanged: true}, nil
+
+	case v1alpha1.PublicIPStateAttaching:
+		// Let the in-flight attach complete, then auto-detach on next reconcile.
+		// OnSuccess will set state to Attached, which triggers this path again.
+		log.Info("ComputeInstance is being deleted but attach is in-flight, waiting",
+			"computeInstanceUUID", publicIP.Spec.ComputeInstance)
+		return autoDetachResult{requeue: true}, nil
+
+	case v1alpha1.PublicIPStateReleasing:
+		// Detach already in progress, no-op. When detach completes,
+		// maybeRemoveCIFinalizer will handle finalizer cleanup.
+		log.Info("ComputeInstance is being deleted but detach is already in progress",
+			"computeInstanceUUID", publicIP.Spec.ComputeInstance)
+		return autoDetachResult{}, nil
+
+	case v1alpha1.PublicIPStateAllocated:
+		// Either detach already completed (spec empty) or user just set the CI ref
+		// and the CI is being deleted before attach started. Clear spec if set to
+		// prevent the attach flow from proceeding, then attempt finalizer removal.
+		specChanged := false
+		if publicIP.Spec.ComputeInstance != "" {
+			publicIP.Spec.ComputeInstance = ""
+			specChanged = true
+		}
+		if err := r.maybeRemoveCIFinalizer(ctx, ci.Labels[osacComputeInstanceIDLabel], publicIP.Name); err != nil {
+			return autoDetachResult{}, err
+		}
+		return autoDetachResult{specChanged: specChanged}, nil
+
+	default:
+		// Covers Pending and any future states. Clear the spec to prevent the
+		// finalizer (added above) from being stranded with no removal path.
+		log.Info("clearing ComputeInstance reference on PublicIP in unexpected state during auto-detach",
+			"state", publicIP.Status.State,
+			"computeInstanceUUID", publicIP.Spec.ComputeInstance)
+		publicIP.Spec.ComputeInstance = ""
+		if err := r.maybeRemoveCIFinalizer(ctx, ci.Labels[osacComputeInstanceIDLabel], publicIP.Name); err != nil {
+			return autoDetachResult{}, err
+		}
+		return autoDetachResult{specChanged: true}, nil
+	}
+}
+
+// maybeRemoveCIFinalizer removes the publicip-detach finalizer from the
+// ComputeInstance identified by ciUUID if no PublicIPs still reference it.
+// The finalizer stays until ALL PublicIPs are detached (multi-attach safe).
+//
+// excludePublicIP is the name of a PublicIP whose spec.computeInstance has been
+// cleared in memory but not yet persisted. The API server still shows the old
+// value, so we skip it to avoid a false "still referenced" result.
+// Pass "" when no exclusion is needed (e.g. from OnSuccess, where the spec is
+// already persisted).
+func (r *PublicIPReconciler) maybeRemoveCIFinalizer(ctx context.Context, ciUUID string, excludePublicIP string) error {
+	log := ctrllog.FromContext(ctx)
+
+	ciList := &v1alpha1.ComputeInstanceList{}
+	if err := r.List(ctx, ciList,
+		client.InNamespace(r.ComputeInstanceNamespace),
+		client.MatchingLabels{osacComputeInstanceIDLabel: ciUUID},
+	); err != nil {
+		return err
+	}
+	if len(ciList.Items) == 0 {
+		return nil // CI already gone
+	}
+
+	ci := &ciList.Items[0]
+	if !controllerutil.ContainsFinalizer(ci, osacPublicIPDetachFinalizer) {
+		return nil // finalizer already removed
+	}
+
+	// Check if any PublicIPs still reference this CI
+	publicIPs := &v1alpha1.PublicIPList{}
+	if err := r.List(ctx, publicIPs, client.InNamespace(r.NetworkingNamespace)); err != nil {
+		return err
+	}
+
+	for i := range publicIPs.Items {
+		if publicIPs.Items[i].Name == excludePublicIP {
+			continue
+		}
+		if publicIPs.Items[i].Spec.ComputeInstance == ciUUID {
+			log.Info("other PublicIPs still reference CI, keeping finalizer",
+				"computeInstanceUUID", ciUUID,
+				"publicIP", publicIPs.Items[i].Name)
+			return nil
+		}
+	}
+
+	// No more references, remove finalizer
+	log.Info("all PublicIPs detached, removing CI finalizer",
+		"computeInstance", ci.Name, "computeInstanceUUID", ciUUID)
+	if controllerutil.RemoveFinalizer(ci, osacPublicIPDetachFinalizer) {
+		if err := r.Update(ctx, ci); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleDelete sets the Deleting phase, runs deprovisioning, and removes the finalizer
@@ -343,9 +574,11 @@ func (r *PublicIPReconciler) handleDelete(ctx context.Context, publicIP *v1alpha
 
 // handleProvisioning delegates to the shared provisioning lifecycle, which triggers
 // an AAP job (e.g., osac-create-public-ip) and polls its status until completion.
-func (r *PublicIPReconciler) handleProvisioning(ctx context.Context, publicIP *v1alpha1.PublicIP) (ctrl.Result, error) {
+func (r *PublicIPReconciler) handleProvisioning(ctx context.Context, publicIP *v1alpha1.PublicIP, priorCIUUID string) (ctrl.Result, error) {
+	log := ctrllog.FromContext(ctx)
+
 	if r.ProvisioningProvider == nil {
-		ctrllog.FromContext(ctx).Info("no provisioning provider configured, skipping provisioning")
+		log.Info("no provisioning provider configured, skipping provisioning")
 		return ctrl.Result{}, nil
 	}
 
@@ -353,8 +586,43 @@ func (r *PublicIPReconciler) handleProvisioning(ctx context.Context, publicIP *v
 		&provisioning.State{Jobs: &publicIP.Status.Jobs, DesiredConfigVersion: publicIP.Status.DesiredConfigVersion},
 		r.MaxJobHistory, r.StatusPollInterval,
 		&provisioning.PollCallbacks{
-			OnFailed:  func(_ string) { publicIP.Status.Phase = v1alpha1.PublicIPPhaseFailed },
-			OnSuccess: func(_ provisioning.ProvisionStatus) { publicIP.Status.Phase = v1alpha1.PublicIPPhaseReady },
+			OnFailed: func(_ string) {
+				publicIP.Status.Phase = v1alpha1.PublicIPPhaseFailed
+				publicIP.Status.State = v1alpha1.PublicIPStateFailed
+			},
+			OnSuccess: func(_ provisioning.ProvisionStatus) {
+				publicIP.Status.Phase = v1alpha1.PublicIPPhaseReady
+				// Determine final state from spec: if CI ref is present, an attach job
+				// just completed; if empty, this was either initial allocation or detach.
+				if publicIP.Spec.ComputeInstance != "" {
+					publicIP.Status.State = v1alpha1.PublicIPStateAttached
+					if r.Recorder != nil {
+						r.Recorder.Eventf(publicIP, nil, corev1.EventTypeNormal,
+							eventReasonAttached, eventActionReconcile,
+							"PublicIP attached to ComputeInstance")
+					}
+					// One-shot attach (Pending -> Attached) skips the Allocated state,
+					// so the address population guard in handleUpdate never fires.
+					// Populate address here to cover that path.
+					if publicIP.Status.Address == "" {
+						if targetClient, err := getTargetClient(ctx, r.mgr, r.targetCluster); err == nil {
+							if ip := r.getPublicIPAddress(ctx, targetClient, publicIP.Name); ip != "" {
+								publicIP.Status.Address = ip
+							}
+						}
+					}
+				} else {
+					publicIP.Status.State = v1alpha1.PublicIPStateAllocated
+					// After detach completes, attempt CI finalizer removal
+					if priorCIUUID != "" {
+						if err := r.maybeRemoveCIFinalizer(ctx, priorCIUUID, ""); err != nil {
+							log.Error(err, "failed to remove CI finalizer after detach",
+								"computeInstanceUUID", priorCIUUID)
+							// Non-fatal: finalizer cleanup will retry on next reconcile
+						}
+					}
+				}
+			},
 		},
 		func() bool {
 			return provisioning.CheckAPIServerForNonTerminalProvisionJob(
@@ -449,6 +717,33 @@ func (r *PublicIPReconciler) handleDeprovisioning(ctx context.Context, publicIP 
 		"state", status.State,
 		"message", updatedJob.Message)
 	return ctrl.Result{}, nil
+}
+
+// getPublicIPAddress fetches the LoadBalancer Service created by the AAP create_public_ip
+// playbook and returns the assigned IP from status.loadBalancer.ingress[0].ip.
+// Returns "" on any error or if no IP is assigned yet (best-effort).
+func (r *PublicIPReconciler) getPublicIPAddress(ctx context.Context, targetClient client.Client, publicIPName string) string {
+	log := ctrllog.FromContext(ctx)
+
+	svc := &corev1.Service{}
+	serviceName := publicIPServiceNamePrefix + publicIPName
+	if err := targetClient.Get(ctx, types.NamespacedName{Namespace: defaultMetalLBNamespace, Name: serviceName}, svc); err != nil {
+		log.Error(err, "failed to get LoadBalancer Service", "namespace", defaultMetalLBNamespace, "name", serviceName)
+		return ""
+	}
+
+	if len(svc.Status.LoadBalancer.Ingress) == 0 {
+		log.Info("LoadBalancer Service has no ingress IP yet", "name", serviceName)
+		return ""
+	}
+
+	ip := svc.Status.LoadBalancer.Ingress[0].IP
+	if ip == "" {
+		log.Info("LoadBalancer Service ingress IP is empty", "name", serviceName)
+		return ""
+	}
+
+	return ip
 }
 
 // SetupWithManager registers this controller with the multicluster manager.
