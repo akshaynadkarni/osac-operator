@@ -2307,4 +2307,109 @@ var _ = Describe("ComputeInstance Controller", func() {
 			Expect(provisioning.ComputeBackoffFromJobs(jobs, "v1")).To(Equal(10 * time.Minute))
 		})
 	})
+
+	Describe("PrimarySubnetRef", func() {
+		It("should return empty string when neither subnetRef nor networkAttachments is set", func() {
+			spec := osacv1alpha1.ComputeInstanceSpec{}
+			Expect(spec.PrimarySubnetRef()).To(Equal(""))
+		})
+
+		It("should return subnetRef when subnetRef is set", func() {
+			spec := osacv1alpha1.ComputeInstanceSpec{
+				SubnetRef: "test-subnet",
+			}
+			Expect(spec.PrimarySubnetRef()).To(Equal("test-subnet"))
+		})
+
+		It("should return networkAttachments[0].subnetRef when networkAttachments is set", func() {
+			spec := osacv1alpha1.ComputeInstanceSpec{
+				NetworkAttachments: []osacv1alpha1.NetworkAttachment{
+					{SubnetRef: "primary-subnet", SecurityGroupRefs: []string{"sg-1"}},
+					{SubnetRef: "secondary-subnet", SecurityGroupRefs: []string{"sg-2"}},
+				},
+			}
+			Expect(spec.PrimarySubnetRef()).To(Equal("primary-subnet"))
+		})
+	})
+
+	Context("resolveSubnetTargetNamespace with networkAttachments", func() {
+		const namespaceName = "default"
+		ctx := context.Background()
+
+		deleteCI := func(name string) {
+			ci := &osacv1alpha1.ComputeInstance{}
+			nn := types.NamespacedName{Name: name, Namespace: namespaceName}
+			if err := k8sClient.Get(ctx, nn, ci); err == nil {
+				ci.Finalizers = nil
+				_ = k8sClient.Update(ctx, ci)
+				_ = k8sClient.Delete(ctx, ci)
+			}
+		}
+
+		It("should resolve subnet namespace from networkAttachments[0].subnetRef", func() {
+			const resourceName = "test-ci-network-attachments"
+			const tenantName = "tenant-network-attachments"
+			const subnetRef = "test-subnet-network-attachments"
+			defer deleteCI(resourceName)
+			createReadyTenant(ctx, namespaceName, tenantName)
+			defer deleteTenantInNamespace(ctx, namespaceName, tenantName)
+
+			// Create Subnet CR
+			subnet := &osacv1alpha1.Subnet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      subnetRef,
+					Namespace: namespaceName,
+				},
+				Spec: osacv1alpha1.SubnetSpec{
+					VirtualNetwork: "vnet-456",
+					IPv4CIDR:       "10.1.0.0/24",
+				},
+			}
+			Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, subnet)
+			}()
+
+			// Wait for Subnet CR to be cached
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: subnetRef, Namespace: namespaceName}, &osacv1alpha1.Subnet{})
+			}).Should(Succeed())
+
+			nn := types.NamespacedName{Name: resourceName, Namespace: namespaceName}
+			spec := newTestComputeInstanceSpec("test_template")
+			spec.NetworkAttachments = []osacv1alpha1.NetworkAttachment{
+				{SubnetRef: subnetRef, SecurityGroupRefs: []string{"sg-test"}},
+			}
+			resource := &osacv1alpha1.ComputeInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: namespaceName,
+					Annotations: map[string]string{
+						osacTenantAnnotation: tenantName,
+					},
+				},
+				Spec: spec,
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			controllerReconciler := NewComputeInstanceReconciler(testMcManager, "", namespaceName, &mockProvisioningProvider{name: string(provisioning.ProviderTypeAAP)}, 100*time.Millisecond, 0, mcmanager.LocalCluster)
+
+			Eventually(func() error {
+				return controllerReconciler.Client.Get(ctx, nn, &osacv1alpha1.ComputeInstance{})
+			}, 2*time.Second, 10*time.Millisecond).Should(Succeed())
+
+			// Reconcile should succeed and resolve subnet namespace from networkAttachments
+			_, err := controllerReconciler.Reconcile(ctx, mcreconcile.Request{Request: reconcile.Request{NamespacedName: nn}})
+			Expect(err).NotTo(HaveOccurred())
+
+			ci := &osacv1alpha1.ComputeInstance{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, nn, ci)).To(Succeed())
+				g.Expect(ci.Status.Phase).To(Equal(osacv1alpha1.ComputeInstancePhaseStarting))
+				// Verify subnet-target-namespace annotation was set
+				g.Expect(ci.Annotations).To(HaveKey(osacSubnetTargetNamespaceAnnotation))
+				g.Expect(ci.Annotations[osacSubnetTargetNamespaceAnnotation]).To(Equal(subnetRef))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+		})
+	})
 })

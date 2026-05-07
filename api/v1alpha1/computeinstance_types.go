@@ -66,7 +66,21 @@ const (
 	RunStrategyHalted RunStrategyType = "Halted"
 )
 
+// NetworkAttachment defines one NIC: a Subnet CR on the hub plus optional SecurityGroup CR names.
+type NetworkAttachment struct {
+	// SubnetRef is the name of the Subnet CR in the same namespace as the ComputeInstance.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	SubnetRef string `json:"subnetRef"`
+
+	// SecurityGroupRefs lists SecurityGroup CR names in the same namespace as the ComputeInstance.
+	// +kubebuilder:validation:Optional
+	SecurityGroupRefs []string `json:"securityGroupRefs,omitempty"`
+}
+
 // ComputeInstanceSpec defines the desired state of ComputeInstance
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.networkAttachments) && size(self.networkAttachments) > 0 && has(self.subnetRef) && self.subnetRef != \"\")",message="subnetRef must be empty when networkAttachments is set"
 type ComputeInstanceSpec struct {
 	// TemplateID is the unique identifier of the compute instance template to use when creating this compute instance
 	// +kubebuilder:validation:Required
@@ -127,6 +141,12 @@ type ComputeInstanceSpec struct {
 	// +kubebuilder:validation:Optional
 	SubnetRef string `json:"subnetRef,omitempty"`
 
+	// NetworkAttachments defines multiple NICs when more than one subnet (and optional security groups per NIC) is required.
+	// When non-empty, subnetRef must be empty; the first entry is the primary subnet for VM placement (subnet-namespace annotation).
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="networkAttachments is immutable"
+	NetworkAttachments []NetworkAttachment `json:"networkAttachments,omitempty"`
+
 	// RestartRequestedAt is a timestamp signal to request a VM restart (MUTABLE).
 	//
 	// Set this field to the current time (usually NOW) to request a restart.
@@ -178,8 +198,7 @@ const (
 	// True when desiredConfigVersion == reconciledConfigVersion, False while configuration is being applied.
 	ComputeInstanceConditionConfigurationApplied ComputeInstanceConditionType = "ConfigurationApplied"
 
-	// ComputeInstanceConditionReady means the compute instance is ready and accessible.
-	// Mirrors KubeVirt VirtualMachine Ready condition (virt-launcher readiness probe).
+	// ComputeInstanceConditionReady means the compute instance is ready (KubeVirt VM readiness reflected on the CR).
 	ComputeInstanceConditionReady ComputeInstanceConditionType = "Ready"
 
 	// ComputeInstanceConditionRestartInProgress indicates a restart is in progress
@@ -299,3 +318,11 @@ func (ci *ComputeInstance) GetName() string {
 	return ci.ObjectMeta.Name
 }
 
+// PrimarySubnetRef returns the Subnet CR name used for VM placement and the subnet-namespace annotation:
+// the first networkAttachments[].subnetRef when that list is non-empty, otherwise spec.subnetRef (legacy single-NIC).
+func (s ComputeInstanceSpec) PrimarySubnetRef() string {
+	if len(s.NetworkAttachments) > 0 {
+		return s.NetworkAttachments[0].SubnetRef
+	}
+	return s.SubnetRef
+}

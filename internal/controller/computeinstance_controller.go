@@ -54,9 +54,10 @@ const (
 	defaultPreconditionRequeueInterval = 10 * time.Second
 )
 
-// errSubnetNotFound is returned when the Subnet CR referenced by SubnetRef
-// does not exist. handleUpdate treats this as a transient error and requeues
-// with a fixed delay instead of exponential backoff.
+// errSubnetNotFound is returned when the Subnet CR referenced by the primary
+// subnet (spec.subnetRef or networkAttachments[0].subnetRef) does not exist.
+// handleUpdate treats this as a transient error and requeues with a fixed delay
+// instead of exponential backoff.
 var errSubnetNotFound = errors.New("subnet CR not found")
 
 // ComputeInstanceReconciler reconciles a ComputeInstance object
@@ -500,14 +501,16 @@ func (r *ComputeInstanceReconciler) handleDeprovisioning(ctx context.Context, in
 	}
 }
 
-// resolveSubnetTargetNamespace looks up the Subnet CR referenced by spec.subnetRef
-// and returns the subnet target namespace (which equals the Subnet CR name).
-// Returns empty string if subnetRef is not set.
+// resolveSubnetTargetNamespace looks up the Subnet CR referenced by the primary subnet
+// (spec.subnetRef or networkAttachments[0].subnetRef) and returns the subnet target
+// namespace (which equals the Subnet CR name).
+// Returns empty string if no primary subnet is set.
 // Returns error if Subnet CR lookup fails.
 func (r *ComputeInstanceReconciler) resolveSubnetTargetNamespace(ctx context.Context, instance *v1alpha1.ComputeInstance) (string, error) {
 	log := ctrllog.FromContext(ctx)
 
-	if instance.Spec.SubnetRef == "" {
+	primarySubnetRef := instance.Spec.PrimarySubnetRef()
+	if primarySubnetRef == "" {
 		// No subnet reference, no namespace to resolve
 		return "", nil
 	}
@@ -515,20 +518,20 @@ func (r *ComputeInstanceReconciler) resolveSubnetTargetNamespace(ctx context.Con
 	// Look up Subnet CR in the same namespace as ComputeInstance
 	subnet := &v1alpha1.Subnet{}
 	subnetKey := types.NamespacedName{
-		Name:      instance.Spec.SubnetRef,
+		Name:      primarySubnetRef,
 		Namespace: instance.Namespace,
 	}
 
 	err := r.Get(ctx, subnetKey, subnet)
 	if err != nil {
-		return "", fmt.Errorf("failed to get Subnet CR %s: %w", instance.Spec.SubnetRef, err)
+		return "", fmt.Errorf("failed to get Subnet CR %s: %w", primarySubnetRef, err)
 	}
 
 	// Subnet namespace = Subnet CR name (established pattern from Phase 17)
 	subnetTargetNamespace := subnet.Name
 
 	log.Info("Resolved subnet target namespace from Subnet CR",
-		"subnetRef", instance.Spec.SubnetRef,
+		"primarySubnetRef", primarySubnetRef,
 		"subnetTargetNamespace", subnetTargetNamespace,
 	)
 
@@ -536,16 +539,16 @@ func (r *ComputeInstanceReconciler) resolveSubnetTargetNamespace(ctx context.Con
 }
 
 // syncSubnetTargetNamespaceAnnotation ensures the subnet-target-namespace annotation is set
-// when SubnetRef is configured. SubnetRef is immutable, so the annotation only
-// needs to be resolved and written once; subsequent reconciles reuse the cached
-// annotation value. Returns the resolved namespace, whether the annotation was
-// written, and any error.
+// when a primary subnet (subnetRef or networkAttachments[0].subnetRef) is configured.
+// The primary subnet reference is immutable, so the annotation only needs to be resolved
+// and written once; subsequent reconciles reuse the cached annotation value.
+// Returns the resolved namespace, whether the annotation was written, and any error.
 func (r *ComputeInstanceReconciler) syncSubnetTargetNamespaceAnnotation(ctx context.Context, instance *v1alpha1.ComputeInstance) (string, bool, error) {
-	if instance.Spec.SubnetRef == "" {
+	if instance.Spec.PrimarySubnetRef() == "" {
 		return "", false, nil
 	}
 
-	// SubnetRef is immutable — if the annotation is already set, reuse it.
+	// Primary subnet is immutable — if the annotation is already set, reuse it.
 	if ns, ok := instance.Annotations[osacSubnetTargetNamespaceAnnotation]; ok {
 		return ns, false, nil
 	}

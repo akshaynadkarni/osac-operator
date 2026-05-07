@@ -130,6 +130,32 @@ spec:
                 x-kubernetes-validations:
                 - message: memoryGiB is immutable
                   rule: self == oldSelf
+              networkAttachments:
+                description: |-
+                  NetworkAttachments defines multiple NICs when more than one subnet (and optional security groups per NIC) is required.
+                  When non-empty, subnetRef must be empty; the first entry is the primary subnet for VM placement (subnet-namespace annotation).
+                items:
+                  description: 'NetworkAttachment defines one NIC: a Subnet CR on
+                    the hub plus optional SecurityGroup CR names.'
+                  properties:
+                    securityGroupRefs:
+                      description: SecurityGroupRefs lists SecurityGroup CR names
+                        in the same namespace as the ComputeInstance.
+                      items:
+                        type: string
+                      type: array
+                    subnetRef:
+                      description: SubnetRef is the name of the Subnet CR in the same
+                        namespace as the ComputeInstance.
+                      minLength: 1
+                      type: string
+                  required:
+                  - subnetRef
+                  type: object
+                type: array
+                x-kubernetes-validations:
+                - message: networkAttachments is immutable
+                  rule: self == oldSelf
               restartRequestedAt:
                 description: |-
                   RestartRequestedAt is a timestamp signal to request a VM restart (MUTABLE).
@@ -200,6 +226,10 @@ spec:
             - runStrategy
             - templateID
             type: object
+            x-kubernetes-validations:
+            - message: subnetRef must be empty when networkAttachments is set
+              rule: '!(has(self.networkAttachments) && size(self.networkAttachments)
+                > 0 && has(self.subnetRef) && self.subnetRef != "")'
           status:
             description: status defines the observed state of ComputeInstance
             properties:
