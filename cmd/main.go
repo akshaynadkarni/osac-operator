@@ -97,6 +97,10 @@ const (
 	envClusterAAPProvisionTemplate   = "OSAC_CLUSTER_AAP_PROVISION_TEMPLATE"
 	envClusterAAPDeprovisionTemplate = "OSAC_CLUSTER_AAP_DEPROVISION_TEMPLATE"
 
+	// PublicIP attachment webhook environment variables (used when OSAC_PROVISIONING_PROVIDER=eda)
+	envPublicIPAttachWebhook = "OSAC_PUBLIC_IP_ATTACH_WEBHOOK"
+	envPublicIPDetachWebhook = "OSAC_PUBLIC_IP_DETACH_WEBHOOK"
+
 	// Job history configuration
 	envMaxJobHistory = "OSAC_MAX_JOB_HISTORY"
 
@@ -435,6 +439,7 @@ func setupNetworkingControllers(
 	mgr mcmanager.Manager,
 	grpcConn *grpc.ClientConn,
 	maxJobHistory int,
+	minimumRequestInterval time.Duration,
 ) error {
 	localMgr := mgr.GetLocalManager()
 
@@ -456,6 +461,28 @@ func setupNetworkingControllers(
 	templatePrefix := helpers.GetEnvWithDefault(envAAPTemplatePrefix, "osac")
 	aapClient := aap.NewClient(aapURL, aapToken, aapInsecureSkipVerify)
 	networkingProvider := provisioning.NewAAPProviderWithPrefix(aapClient, templatePrefix)
+
+	// Create a dedicated provider for PublicIP attach/detach operations.
+	// Uses explicit template names because TriggerProvision hardcodes action="create"
+	// and TriggerDeprovision hardcodes action="delete" in resolveTemplateName. Explicit
+	// names bypass the action resolution so TriggerProvision maps to
+	// {prefix}-attach-public-ip and TriggerDeprovision maps to {prefix}-detach-public-ip.
+	// This provider will move to the PublicIPAttachment controller when that CRD is introduced.
+	// Poll interval is discarded (_) because we reuse statusPollInterval from the
+	// shared networking setup above. minimumRequestInterval is passed for EDA webhook
+	// rate limiting when OSAC_PROVISIONING_PROVIDER=eda.
+	publicIPAttachmentProvider, _, err := createProvider(
+		provisioning.ProviderType(helpers.GetEnvWithDefault(envProvisioningProvider, string(provisioning.ProviderTypeAAP))),
+		os.Getenv(envPublicIPAttachWebhook), os.Getenv(envPublicIPDetachWebhook),
+		aapURL, aapToken,
+		fmt.Sprintf("%s-attach-public-ip", templatePrefix), fmt.Sprintf("%s-detach-public-ip", templatePrefix),
+		"", // no prefix needed: explicit template names are always used
+		aapInsecureSkipVerify,
+		minimumRequestInterval,
+	)
+	if err != nil {
+		return fmt.Errorf("publicip attachment provider: %w", err)
+	}
 
 	// Setup VirtualNetwork controller and feedback
 	if grpcConn != nil {
@@ -528,7 +555,7 @@ func setupNetworkingControllers(
 	// Setup PublicIP controller
 	if err := controller.NewPublicIPReconciler(
 		mgr, networkingNamespace, computeInstanceNamespace,
-		networkingProvider, statusPollInterval, maxJobHistory, targetCluster,
+		networkingProvider, publicIPAttachmentProvider, statusPollInterval, maxJobHistory, targetCluster,
 	).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("publicip controller: %w", err)
 	}
@@ -756,7 +783,7 @@ func main() {
 		}
 	}
 	if ctrlFlags.Networking {
-		if err := setupNetworkingControllers(mgr, grpcConn, maxJobHistory); err != nil {
+		if err := setupNetworkingControllers(mgr, grpcConn, maxJobHistory, minimumRequestInterval); err != nil {
 			setupLog.Error(err, "unable to setup networking controllers")
 			os.Exit(1)
 		}

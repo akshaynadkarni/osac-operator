@@ -56,16 +56,17 @@ const (
 // Phase transitions: "" -> Progressing -> Ready/Failed; on delete: Deleting.
 type PublicIPReconciler struct {
 	client.Client
-	APIReader                client.Reader
-	Scheme                   *runtime.Scheme
-	Recorder                 events.EventRecorder
-	mgr                      mcmanager.Manager
-	NetworkingNamespace      string
-	ComputeInstanceNamespace string
-	ProvisioningProvider     provisioning.ProvisioningProvider
-	StatusPollInterval       time.Duration
-	MaxJobHistory            int
-	targetCluster            mc.ClusterName
+	APIReader                  client.Reader
+	Scheme                     *runtime.Scheme
+	Recorder                   events.EventRecorder
+	mgr                        mcmanager.Manager
+	NetworkingNamespace        string
+	ComputeInstanceNamespace   string
+	ProvisioningProvider       provisioning.ProvisioningProvider
+	PublicIPAttachmentProvider provisioning.ProvisioningProvider
+	StatusPollInterval         time.Duration
+	MaxJobHistory              int
+	targetCluster              mc.ClusterName
 }
 
 // NewPublicIPReconciler creates a new reconciler for PublicIP resources.
@@ -74,6 +75,7 @@ func NewPublicIPReconciler(
 	networkingNamespace string,
 	computeInstanceNamespace string,
 	provisioningProvider provisioning.ProvisioningProvider,
+	publicIPAttachmentProvider provisioning.ProvisioningProvider,
 	statusPollInterval time.Duration,
 	maxJobHistory int,
 	targetCluster mc.ClusterName,
@@ -91,17 +93,18 @@ func NewPublicIPReconciler(
 		computeInstanceNamespace = defaultComputeInstanceNamespace
 	}
 	return &PublicIPReconciler{
-		Client:                   mgr.GetLocalManager().GetClient(),
-		APIReader:                mgr.GetLocalManager().GetAPIReader(),
-		Scheme:                   mgr.GetLocalManager().GetScheme(),
-		Recorder:                 mgr.GetLocalManager().GetEventRecorder(publicipControllerName),
-		mgr:                      mgr,
-		NetworkingNamespace:      networkingNamespace,
-		ComputeInstanceNamespace: computeInstanceNamespace,
-		ProvisioningProvider:     provisioningProvider,
-		StatusPollInterval:       statusPollInterval,
-		MaxJobHistory:            maxJobHistory,
-		targetCluster:            targetCluster,
+		Client:                     mgr.GetLocalManager().GetClient(),
+		APIReader:                  mgr.GetLocalManager().GetAPIReader(),
+		Scheme:                     mgr.GetLocalManager().GetScheme(),
+		Recorder:                   mgr.GetLocalManager().GetEventRecorder(publicipControllerName),
+		mgr:                        mgr,
+		NetworkingNamespace:        networkingNamespace,
+		ComputeInstanceNamespace:   computeInstanceNamespace,
+		ProvisioningProvider:       provisioningProvider,
+		PublicIPAttachmentProvider: publicIPAttachmentProvider,
+		StatusPollInterval:         statusPollInterval,
+		MaxJobHistory:              maxJobHistory,
+		targetCluster:              targetCluster,
 	}
 }
 
@@ -289,7 +292,7 @@ func (r *PublicIPReconciler) handleUpdate(ctx context.Context, publicIP *v1alpha
 
 	r.maybePopulateAddress(ctx, publicIP)
 
-	return r.handleProvisioning(ctx, publicIP, priorCIUUID)
+	return r.routeProvisioning(ctx, publicIP, priorCIUUID)
 }
 
 // maybePopulateAddress sets status.address from the MetalLB LoadBalancer Service
@@ -567,6 +570,275 @@ func (r *PublicIPReconciler) handleDelete(ctx context.Context, publicIP *v1alpha
 	controllerutil.RemoveFinalizer(publicIP, osacPublicIPFinalizer)
 	if err := r.Update(ctx, publicIP); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// routeProvisioning dispatches to the correct handler based on state.
+// Failed state routes based on spec intent: spec.computeInstance set means retry
+// attach, empty + failed detach job means retry detach, otherwise provision.
+// This prevents the create playbook from running after a failed attach/detach
+// which could conflict with a partially-moved MetalLB Service.
+func (r *PublicIPReconciler) routeProvisioning(ctx context.Context, publicIP *v1alpha1.PublicIP, priorCIUUID string) (ctrl.Result, error) {
+	switch publicIP.Status.State {
+	case v1alpha1.PublicIPStateAttaching:
+		return r.handleAttaching(ctx, publicIP)
+	case v1alpha1.PublicIPStateReleasing:
+		return r.handleDetaching(ctx, publicIP, priorCIUUID)
+	case v1alpha1.PublicIPStateFailed:
+		// Route based on spec intent. spec.computeInstance unambiguously signals
+		// attach intent, so no job-type lookup is needed for that case.
+		// For empty spec.computeInstance, we check the latest detach job to
+		// disambiguate "failed detach" (needs handleDetaching to retry moving
+		// the Service back) from "failed provision" (needs handleProvisioning
+		// with backoff).
+		if publicIP.Spec.ComputeInstance != "" {
+			return r.handleAttaching(ctx, publicIP)
+		}
+		latestDetach := provisioning.FindLatestJobByType(publicIP.Status.Jobs, v1alpha1.JobTypeDetach)
+		if latestDetach != nil && latestDetach.State == v1alpha1.JobStateFailed {
+			return r.handleDetaching(ctx, publicIP, priorCIUUID)
+		}
+		return r.handleProvisioning(ctx, publicIP, priorCIUUID)
+	default:
+		return r.handleProvisioning(ctx, publicIP, priorCIUUID)
+	}
+}
+
+// handleAttaching triggers an AAP attach job (osac-attach-public-ip) via the
+// PublicIPAttachmentProvider and polls until completion. On success, state transitions
+// to Attached. Jobs are tracked as JobTypeAttach in Status.Jobs.
+//
+// Uses TriggerProvision (not a dedicated attach method) because the
+// PublicIPAttachmentProvider maps TriggerProvision to osac-attach-public-ip.
+// When the PublicIPAttachment CRD is introduced, this provider moves to the new
+// controller where attach IS the standard provision operation.
+func (r *PublicIPReconciler) handleAttaching(ctx context.Context, publicIP *v1alpha1.PublicIP) (ctrl.Result, error) {
+	log := ctrllog.FromContext(ctx)
+
+	if r.PublicIPAttachmentProvider == nil {
+		log.Info("no attachment provider configured, skipping attach")
+		return ctrl.Result{}, nil
+	}
+
+	latestAttachJob := provisioning.FindLatestJobByType(publicIP.Status.Jobs, v1alpha1.JobTypeAttach)
+
+	// Trigger a new attach job if none exists, or if the previous one completed for
+	// a different config version (spec changed since last attach, e.g., re-attach to
+	// a different ComputeInstance).
+	if latestAttachJob == nil || latestAttachJob.JobID == "" ||
+		(latestAttachJob.State.IsTerminal() && latestAttachJob.ConfigVersion != publicIP.Status.DesiredConfigVersion) {
+
+		log.Info("triggering attach job", "provider", r.PublicIPAttachmentProvider.Name())
+		result, err := r.PublicIPAttachmentProvider.TriggerProvision(ctx, publicIP)
+		if err != nil {
+			log.Error(err, "failed to trigger attach job")
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+
+		newJob := v1alpha1.JobStatus{
+			JobID:         result.JobID,
+			Type:          v1alpha1.JobTypeAttach,
+			Timestamp:     metav1.NewTime(time.Now().UTC()),
+			State:         result.InitialState,
+			Message:       result.Message,
+			ConfigVersion: publicIP.Status.DesiredConfigVersion,
+		}
+		publicIP.Status.Jobs = provisioning.AppendJob(publicIP.Status.Jobs, newJob, r.MaxJobHistory)
+
+		// Reset state/phase so the next reconcile routes back to handleAttaching.
+		// Without this, a retry from Failed state would leave phase=Failed and
+		// routeProvisioning would misroute to handleProvisioning on the next reconcile.
+		publicIP.Status.Phase = v1alpha1.PublicIPPhaseProgressing
+		publicIP.Status.State = v1alpha1.PublicIPStateAttaching
+
+		// Flush status immediately so the job ID survives a controller restart
+		// and we don't trigger a duplicate job on the next reconcile.
+		if err := r.Status().Update(ctx, publicIP); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("attach job triggered", "jobID", result.JobID)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	if !latestAttachJob.State.IsTerminal() {
+		status, err := r.PublicIPAttachmentProvider.GetProvisionStatus(ctx, publicIP, latestAttachJob.JobID)
+		if err != nil {
+			log.Error(err, "failed to get attach job status", "jobID", latestAttachJob.JobID)
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+
+		if status.State != latestAttachJob.State || status.Message != latestAttachJob.Message {
+			updatedJob := *latestAttachJob
+			updatedJob.State = status.State
+			updatedJob.Message = status.MessageWithDetails()
+			provisioning.UpdateJob(publicIP.Status.Jobs, updatedJob)
+		}
+
+		if status.State == v1alpha1.JobStateSucceeded {
+			publicIP.Status.Phase = v1alpha1.PublicIPPhaseReady
+			publicIP.Status.State = v1alpha1.PublicIPStateAttached
+			if r.Recorder != nil {
+				r.Recorder.Eventf(publicIP, nil, corev1.EventTypeNormal,
+					eventReasonAttached, eventActionReconcile,
+					"PublicIP attached to ComputeInstance")
+			}
+			// The attach playbook deletes the parking Service (osac-pip-<name>
+			// in metallb-system) and creates a new LB Service with a different
+			// name (osac-pip-<name>-ingress in the VM namespace). The IP is
+			// preserved via MetalLB annotations, so status.address stays valid
+			// if it was already populated. This lookup only fires for one-shot
+			// attach (Pending -> Attached) where the Allocated phase was skipped
+			// and address was never populated.
+			if publicIP.Status.Address == "" {
+				if targetClient, err := getTargetClient(ctx, r.mgr, r.targetCluster); err == nil {
+					if ns := publicIP.Annotations[osacPublicIPTargetNamespaceAnnotation]; ns != "" {
+						ingressServiceName := publicIPServiceNamePrefix + publicIP.Name + "-ingress"
+						svc := &corev1.Service{}
+						if svcErr := targetClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: ingressServiceName}, svc); svcErr == nil {
+							if len(svc.Status.LoadBalancer.Ingress) > 0 && svc.Status.LoadBalancer.Ingress[0].IP != "" {
+								publicIP.Status.Address = svc.Status.LoadBalancer.Ingress[0].IP
+							}
+						}
+					}
+				}
+			}
+			log.Info("attach job succeeded", "jobID", latestAttachJob.JobID)
+			return ctrl.Result{}, nil
+		}
+
+		if status.State == v1alpha1.JobStateFailed {
+			publicIP.Status.Phase = v1alpha1.PublicIPPhaseFailed
+			publicIP.Status.State = v1alpha1.PublicIPStateFailed
+			log.Info("attach job failed", "jobID", latestAttachJob.JobID, "message", status.MessageWithDetails())
+			return ctrl.Result{}, nil
+		}
+
+		log.Info("attach job still running", "jobID", latestAttachJob.JobID, "state", status.State)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// handleDetaching triggers an AAP detach job (osac-detach-public-ip) via the
+// PublicIPAttachmentProvider and polls until completion. On success, state transitions
+// to Allocated and the CI detach finalizer is cleaned up. Jobs are tracked as
+// JobTypeDetach in Status.Jobs.
+//
+// Uses TriggerDeprovision because detach is the inverse of attach: the same
+// provider maps TriggerDeprovision to osac-detach-public-ip. When the
+// PublicIPAttachment CRD is introduced, detach becomes the standard deprovision
+// operation (PublicIPAttachment deletion).
+func (r *PublicIPReconciler) handleDetaching(ctx context.Context, publicIP *v1alpha1.PublicIP, priorCIUUID string) (ctrl.Result, error) {
+	log := ctrllog.FromContext(ctx)
+
+	if r.PublicIPAttachmentProvider == nil {
+		log.Info("no attachment provider configured, skipping detach")
+		return ctrl.Result{}, nil
+	}
+
+	// Cannot detach while an attach job is still running: the MetalLB Service
+	// may be mid-move between namespaces.
+	latestAttachJob := provisioning.FindLatestJobByType(publicIP.Status.Jobs, v1alpha1.JobTypeAttach)
+	if latestAttachJob != nil && !latestAttachJob.State.IsTerminal() {
+		log.Info("attach job still running, waiting before detach", "jobID", latestAttachJob.JobID)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
+	latestDetachJob := provisioning.FindLatestJobByType(publicIP.Status.Jobs, v1alpha1.JobTypeDetach)
+
+	if latestDetachJob == nil || latestDetachJob.JobID == "" ||
+		(latestDetachJob.State.IsTerminal() && latestDetachJob.ConfigVersion != publicIP.Status.DesiredConfigVersion) {
+
+		log.Info("triggering detach job", "provider", r.PublicIPAttachmentProvider.Name())
+		result, err := r.PublicIPAttachmentProvider.TriggerDeprovision(ctx, publicIP)
+		if err != nil {
+			log.Error(err, "failed to trigger detach job")
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+
+		switch result.Action {
+		case provisioning.DeprovisionWaiting:
+			log.Info("detach not ready, requeueing")
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		case provisioning.DeprovisionSkipped:
+			log.Info("provider skipped detach")
+			publicIP.Status.Phase = v1alpha1.PublicIPPhaseReady
+			publicIP.Status.State = v1alpha1.PublicIPStateAllocated
+			// Remove the CI detach finalizer even when the provider skips detach,
+			// otherwise it blocks the ComputeInstance from being garbage collected.
+			if priorCIUUID != "" {
+				if err := r.maybeRemoveCIFinalizer(ctx, priorCIUUID, ""); err != nil {
+					log.Error(err, "failed to remove CI finalizer after skipped detach",
+						"computeInstanceUUID", priorCIUUID)
+				}
+			}
+			return ctrl.Result{}, nil
+		case provisioning.DeprovisionTriggered:
+			newJob := v1alpha1.JobStatus{
+				JobID:         result.JobID,
+				Type:          v1alpha1.JobTypeDetach,
+				Timestamp:     metav1.NewTime(time.Now().UTC()),
+				State:         v1alpha1.JobStatePending,
+				Message:       "Detach job triggered",
+				ConfigVersion: publicIP.Status.DesiredConfigVersion,
+			}
+			publicIP.Status.Jobs = provisioning.AppendJob(publicIP.Status.Jobs, newJob, r.MaxJobHistory)
+
+			// Reset state/phase so the next reconcile routes back to handleDetaching.
+			publicIP.Status.Phase = v1alpha1.PublicIPPhaseProgressing
+			publicIP.Status.State = v1alpha1.PublicIPStateReleasing
+
+			// Flush status immediately so the job ID survives a controller restart.
+			if err := r.Status().Update(ctx, publicIP); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.Info("detach job triggered", "jobID", result.JobID)
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		default:
+			log.Info("unknown deprovision action returned by provider", "action", result.Action)
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+	}
+
+	if latestDetachJob != nil && !latestDetachJob.State.IsTerminal() {
+		status, err := r.PublicIPAttachmentProvider.GetDeprovisionStatus(ctx, publicIP, latestDetachJob.JobID)
+		if err != nil {
+			log.Error(err, "failed to get detach job status", "jobID", latestDetachJob.JobID)
+			return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+		}
+
+		if status.State != latestDetachJob.State || status.Message != latestDetachJob.Message {
+			updatedJob := *latestDetachJob
+			updatedJob.State = status.State
+			updatedJob.Message = status.MessageWithDetails()
+			provisioning.UpdateJob(publicIP.Status.Jobs, updatedJob)
+		}
+
+		if status.State == v1alpha1.JobStateSucceeded {
+			publicIP.Status.Phase = v1alpha1.PublicIPPhaseReady
+			publicIP.Status.State = v1alpha1.PublicIPStateAllocated
+			if priorCIUUID != "" {
+				if err := r.maybeRemoveCIFinalizer(ctx, priorCIUUID, ""); err != nil {
+					log.Error(err, "failed to remove CI finalizer after detach",
+						"computeInstanceUUID", priorCIUUID)
+				}
+			}
+			log.Info("detach job succeeded", "jobID", latestDetachJob.JobID)
+			return ctrl.Result{}, nil
+		}
+
+		if status.State == v1alpha1.JobStateFailed {
+			publicIP.Status.Phase = v1alpha1.PublicIPPhaseFailed
+			publicIP.Status.State = v1alpha1.PublicIPStateFailed
+			log.Info("detach job failed", "jobID", latestDetachJob.JobID, "message", status.MessageWithDetails())
+			return ctrl.Result{}, nil
+		}
+
+		log.Info("detach job still running", "jobID", latestDetachJob.JobID, "state", status.State)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
 	return ctrl.Result{}, nil

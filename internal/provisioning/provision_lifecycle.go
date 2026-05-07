@@ -250,20 +250,24 @@ func RunProvisioningLifecycle(
 	}
 }
 
-// IsConfigApplied returns true if the latest provision job succeeded with a ConfigVersion
-// matching the desired version, indicating the current spec has been applied.
-// Also returns true for legacy jobs (empty ConfigVersion) that succeeded, to avoid
-// re-triggering provisioning for resources provisioned before ConfigVersion tracking.
+// IsConfigApplied returns true if the current spec has been successfully applied.
+// Checks all job types (provision, attach, detach) for a succeeded job with a
+// ConfigVersion matching the desired version, because spec changes may be applied
+// by different operations: a spec.computeInstance change is applied by an attach
+// or detach job, not a provision job.
+// Also returns true for legacy provision jobs (empty ConfigVersion) that succeeded,
+// to avoid re-triggering provisioning for resources provisioned before ConfigVersion
+// tracking was introduced.
 func IsConfigApplied(jobs *[]v1alpha1.JobStatus, desiredConfigVersion string) bool {
+	for i := len(*jobs) - 1; i >= 0; i-- {
+		job := (*jobs)[i]
+		if job.State == v1alpha1.JobStateSucceeded && job.ConfigVersion == desiredConfigVersion {
+			return true
+		}
+	}
+	// Legacy fallback: latest provision job succeeded with no ConfigVersion
 	latestJob := FindLatestJobByType(*jobs, v1alpha1.JobTypeProvision)
-	if latestJob == nil || latestJob.State != v1alpha1.JobStateSucceeded {
-		return false
-	}
-	// Legacy job without ConfigVersion — treat as applied
-	if latestJob.ConfigVersion == "" {
-		return true
-	}
-	return latestJob.ConfigVersion == desiredConfigVersion
+	return latestJob != nil && latestJob.State == v1alpha1.JobStateSucceeded && latestJob.ConfigVersion == ""
 }
 
 // ComputeDesiredConfigVersion computes a hash of the spec and returns it.
