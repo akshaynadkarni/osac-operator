@@ -10,6 +10,8 @@ rules:
   verbs:
   - get
   - list
+# Used when deployed on the same cluster as KubeVirt VMs (local/auto vm-cluster-mode).
+# In remote mode the proxy authenticates via a kubeconfig Secret instead.
 - apiGroups:
   - subresources.kubevirt.io
   resources:
