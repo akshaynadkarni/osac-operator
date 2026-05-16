@@ -703,6 +703,11 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 		}
 	}
 
+	// Inject tenant storage classes into context for AAP extra_vars
+	if len(tenant.Status.StorageClasses) > 0 {
+		ctx = provisioning.WithTenantStorageClasses(ctx, tenant.Status.StorageClasses)
+	}
+
 	// Always delegate to provisioning lifecycle — EvaluateAction decides
 	// whether to skip, poll, or trigger. This avoids the A-B-A problem where
 	// IsConfigApplied alone could match a stale historical job.

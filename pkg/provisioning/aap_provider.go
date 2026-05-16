@@ -338,7 +338,7 @@ func (p *AAPProvider) launchTemplate(ctx context.Context, templateName string, r
 		return "", fmt.Errorf("failed to get template: %w", err)
 	}
 
-	extraVars, err := extractExtraVars(resource)
+	extraVars, err := extractExtraVars(ctx, resource)
 	if err != nil {
 		return "", fmt.Errorf("failed to extract extra vars: %w", err)
 	}
@@ -440,19 +440,30 @@ func mapAAPStatusToJobState(aapStatus string) v1alpha1.JobState {
 //
 // Future improvement: When/if we migrate away from EDA-triggered templates, this wrapper can be
 // removed and parameters can be passed directly as flat key-value pairs.
-func extractExtraVars(resource client.Object) (map[string]any, error) {
+func extractExtraVars(ctx context.Context, resource client.Object) (map[string]any, error) {
 	// Convert the resource to map using JSON marshaling (respects JSON tags)
 	resourceMap, err := serializeResource(resource)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize resource: %w", err)
 	}
 
-	// Wrap the full resource in EDA event structure for compatibility with EDA-designed templates
+	event := map[string]any{
+		"payload": resourceMap,
+	}
+
+	// Inject tenant storage classes if present in context (set by CI controller)
+	if scs := TenantStorageClassesFromContext(ctx); len(scs) > 0 {
+		scList := make([]map[string]string, len(scs))
+		for i, sc := range scs {
+			scList[i] = map[string]string{"name": sc.Name, "tier": sc.Tier}
+		}
+		event["tenant_storage_classes"] = scList
+	}
+
+	// Wrap in EDA event structure for compatibility with EDA-designed templates
 	return map[string]any{
 		"ansible_eda": map[string]any{
-			"event": map[string]any{
-				"payload": resourceMap,
-			},
+			"event": event,
 		},
 	}, nil
 }
